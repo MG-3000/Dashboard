@@ -73,7 +73,7 @@
   .chart-wrap { position: relative; height: 128px; }
 
   /* future / not-yet-connected slots */
-  .slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 24px; }
+  .slots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 24px; }
   .slot {
     border: 1px dashed var(--line-strong); border-radius: 14px; padding: 16px 14px;
     text-align: left; color: var(--text-faint);
@@ -81,6 +81,16 @@
   .slot .s-title { font-size: 13px; color: var(--text-dim); margin-bottom: 4px; letter-spacing: 0.02em; }
   .slot .s-hint { font-size: 11px; line-height: 1.4; }
   @media (max-width: 560px) { .slots { grid-template-columns: 1fr; } }
+
+  /* Oura connect prompt (shown until authorized) */
+  .oura-connect { border: 1px dashed var(--recovery); border-radius: 16px; padding: 20px; margin-bottom: 16px; }
+  .oura-connect .s-title { color: var(--recovery); font-size: 14px; margin-bottom: 6px; letter-spacing: 0.02em; }
+  .oura-connect .s-body { color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+  .oura-connect a {
+    display: inline-block; margin-top: 12px; color: #06201d; background: var(--recovery);
+    font-size: 13px; font-weight: 600; text-decoration: none; padding: 8px 14px; border-radius: 9px;
+  }
+  .oura-connect a:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 
   /* setup dialog */
   .overlay { position: fixed; inset: 0; background: rgba(10,12,15,0.72); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 10; }
@@ -119,11 +129,9 @@
   <div class="loading" id="loading">Loading readout…</div>
 </div>
 
+<div id="oura"></div>
+
 <div class="slots" id="slots" style="display:none">
-  <div class="slot">
-    <div class="s-title">Sleep &amp; HRV</div>
-    <div class="s-hint">Oura — connect the OAuth Worker to light this up.</div>
-  </div>
   <div class="slot">
     <div class="s-title">Nutrition</div>
     <div class="s-hint">Protein &amp; calories from the nutrition app.</div>
@@ -209,6 +217,7 @@ function run() {
       return;
     }
     render(days);
+    loadOura(c);
   }).catch(err => {
     $("app").innerHTML = '<div class="loading">' + err.message + '</div>';
     openSetup();
@@ -386,6 +395,47 @@ function drawChart(canvas, o) {
 
 // keyboard: Esc closes setup
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSetup(); });
+
+// ─── Oura (sleep / readiness / HRV) ───
+async function loadOura(c) {
+  const box = $("oura");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/oura", { headers: { Authorization: "Bearer " + c.token } });
+    if (res.status === 409) { box.innerHTML = ouraConnectCard(c.base); return; }
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    renderOura((days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1));
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function ouraConnectCard(base) {
+  return '<div class="oura-connect"><div class="s-title">Sleep &amp; recovery — Oura</div>' +
+         '<div class="s-body">Not connected yet. Connect once and your sleep score, readiness, and HRV appear here.</div>' +
+         '<a href="' + base + '/oura/login" target="_blank" rel="noopener">Connect Oura</a></div>';
+}
+
+function renderOura(oura) {
+  const box = $("oura");
+  box.innerHTML = "";
+  if (!oura.length) return;
+
+  const sleepStat = weekAvgDelta(oura, "sleepScore");
+  const readyStat = weekAvgDelta(oura, "readinessScore");
+  const hrvAvg = mean(oura.map(d => d.hrv).filter(v => v != null).slice(-7));
+  const hoursAvg = mean(oura.map(d => d.sleepHours).filter(v => v != null).slice(-7));
+
+  box.appendChild(metricPanel({
+    key: "sleep", title: "Recovery — sleep score", accent: "recovery", field: "sleepScore",
+    days: oura, complete: oura, partial: null, stat: sleepStat, unit: "", goodIsUp: true, kind: "line",
+    subNote: hoursAvg != null ? 'Avg sleep <b class="mono">' + hoursAvg.toFixed(1) + " h</b>" : "",
+  }));
+  box.appendChild(metricPanel({
+    key: "readiness", title: "Recovery — readiness", accent: "recovery", field: "readinessScore",
+    days: oura, complete: oura, partial: null, stat: readyStat, unit: "", goodIsUp: true, kind: "line",
+    subNote: hrvAvg != null ? 'Avg HRV <b class="mono">' + Math.round(hrvAvg) + " ms</b>" : "HRV — filling in as nights sync",
+  }));
+}
 
 run();
 </script>
