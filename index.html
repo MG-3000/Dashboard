@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recomp — daily readout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --ink: #14171c;
+    --panel: #1b1f27;
+    --panel-2: #20252e;
+    --line: rgba(255,255,255,0.07);
+    --line-strong: rgba(255,255,255,0.12);
+    --text: #e7e9ec;
+    --text-dim: #868f9b;
+    --text-faint: #5b636e;
+    --effort: #e8a33d;      /* output / load: steps, training */
+    --effort-soft: rgba(232,163,61,0.14);
+    --recovery: #46b3a6;    /* recovery: resting HR, sleep */
+    --recovery-soft: rgba(70,179,166,0.14);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--ink); color: var(--text);
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 15px; line-height: 1.5;
+    padding: 28px 20px 64px; max-width: 720px; margin-inline: auto;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  /* header */
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; gap: 12px; }
+  h1 {
+    font-family: "Space Grotesk", sans-serif; font-weight: 700;
+    font-size: 26px; letter-spacing: -0.02em; margin: 0;
+  }
+  .gear { background: none; border: none; color: var(--text-faint); font-size: 18px; cursor: pointer; padding: 4px; line-height: 1; }
+  .gear:hover { color: var(--text-dim); }
+  .updated { color: var(--text-faint); font-size: 12px; margin: 0 0 28px; letter-spacing: 0.02em; }
+
+  /* status thesis line — the signature element */
+  .status {
+    border-left: 2px solid var(--line-strong); padding: 2px 0 2px 16px; margin: 0 0 30px;
+  }
+  .status .eyebrow { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px; }
+  .status .verdict { font-family: "Space Grotesk", sans-serif; font-size: 19px; font-weight: 500; letter-spacing: -0.01em; }
+  .status .verdict b { font-weight: 700; }
+  .status.effort { border-color: var(--effort); }
+  .status.recovery { border-color: var(--recovery); }
+
+  /* metric panels */
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px 20px 12px; margin-bottom: 16px; }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .panel-title { display: flex; align-items: center; gap: 8px; font-size: 13px; letter-spacing: 0.03em; color: var(--text-dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.effort { background: var(--effort); }
+  .dot.recovery { background: var(--recovery); }
+  .delta { font-size: 12px; letter-spacing: 0.02em; color: var(--text-dim); }
+  .delta .arrow { font-weight: 500; }
+
+  .figure { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 2px; }
+  .figure .big { font-size: 40px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; }
+  .figure .unit { font-size: 14px; color: var(--text-dim); padding-bottom: 4px; }
+  .figure .partial { font-size: 11px; color: var(--effort); padding-bottom: 6px; letter-spacing: 0.04em; }
+  .avg-note { font-size: 12px; color: var(--text-faint); margin: 0 0 14px; }
+  .avg-note b { color: var(--text-dim); font-weight: 500; }
+  .chart-wrap { position: relative; height: 128px; }
+
+  /* future / not-yet-connected slots */
+  .slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 24px; }
+  .slot {
+    border: 1px dashed var(--line-strong); border-radius: 14px; padding: 16px 14px;
+    text-align: left; color: var(--text-faint);
+  }
+  .slot .s-title { font-size: 13px; color: var(--text-dim); margin-bottom: 4px; letter-spacing: 0.02em; }
+  .slot .s-hint { font-size: 11px; line-height: 1.4; }
+  @media (max-width: 560px) { .slots { grid-template-columns: 1fr; } }
+
+  /* setup dialog */
+  .overlay { position: fixed; inset: 0; background: rgba(10,12,15,0.72); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 10; }
+  .overlay.hidden { display: none; }
+  .setup { background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 18px; padding: 24px; width: 100%; max-width: 380px; }
+  .setup h2 { font-family: "Space Grotesk", sans-serif; font-size: 19px; margin: 0 0 4px; }
+  .setup p { color: var(--text-dim); font-size: 13px; margin: 0 0 18px; }
+  .setup label { display: block; font-size: 12px; color: var(--text-dim); margin: 0 0 6px; letter-spacing: 0.03em; }
+  .setup input {
+    width: 100%; padding: 11px 12px; font-size: 15px; margin-bottom: 14px;
+    background: var(--ink); border: 1px solid var(--line-strong); border-radius: 10px; color: var(--text);
+    font-family: "IBM Plex Mono", monospace;
+  }
+  .setup input:focus, .gear:focus-visible, button:focus-visible { outline: 2px solid var(--recovery); outline-offset: 2px; }
+  .setup button {
+    width: 100%; padding: 12px; font-size: 15px; font-weight: 600; border: none; border-radius: 10px;
+    background: var(--recovery); color: #06201d; cursor: pointer; font-family: inherit;
+  }
+  .setup .err { color: #ff6b6b; font-size: 13px; margin: 10px 0 0; min-height: 18px; }
+  .setup .link { background: none; border: none; color: var(--text-faint); font-size: 12px; margin-top: 10px; cursor: pointer; padding: 4px; width: 100%; }
+
+  .loading { color: var(--text-dim); font-size: 14px; padding: 40px 0; text-align: center; }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Recomp</h1>
+  <button class="gear" id="gear" title="Settings" aria-label="Settings">⚙</button>
+</header>
+<p class="updated mono" id="updated">&nbsp;</p>
+
+<div id="app">
+  <div class="loading" id="loading">Loading readout…</div>
+</div>
+
+<div class="slots" id="slots" style="display:none">
+  <div class="slot">
+    <div class="s-title">Sleep &amp; HRV</div>
+    <div class="s-hint">Oura — connect the OAuth Worker to light this up.</div>
+  </div>
+  <div class="slot">
+    <div class="s-title">Nutrition</div>
+    <div class="s-hint">Protein &amp; calories from the nutrition app.</div>
+  </div>
+  <div class="slot">
+    <div class="s-title">Training</div>
+    <div class="s-hint">Top sets &amp; volume from the workout tracker.</div>
+  </div>
+</div>
+
+<!-- setup -->
+<div class="overlay" id="overlay">
+  <div class="setup">
+    <h2>Connect your data</h2>
+    <p>Points at your health-sync Worker. Stored only on this device.</p>
+    <label for="base">Worker URL</label>
+    <input id="base" type="url" placeholder="https://health-sync.you.workers.dev" autocomplete="off" spellcheck="false">
+    <label for="token">Access token</label>
+    <input id="token" type="password" placeholder="Your HEALTH_TOKEN" autocomplete="current-password">
+    <button id="save">Show my readout</button>
+    <p class="err" id="setupErr"></p>
+    <button class="link" id="forget">Forget this device</button>
+  </div>
+</div>
+
+<script>
+const CFG = "recomp_cfg_v1";
+const DEFAULT_BASE = "https://health-sync.mark-guidi-2.workers.dev";
+
+const $ = (id) => document.getElementById(id);
+let charts = {};
+
+function loadCfg() { try { return JSON.parse(localStorage.getItem(CFG)) || {}; } catch { return {}; } }
+function saveCfg(c) { localStorage.setItem(CFG, JSON.stringify(c)); }
+function todayLocal() { return new Date().toLocaleDateString("en-CA"); } // YYYY-MM-DD in local tz
+
+function openSetup() {
+  const c = loadCfg();
+  $("base").value = c.base || DEFAULT_BASE;
+  $("token").value = c.token || "";
+  $("setupErr").textContent = "";
+  $("overlay").classList.remove("hidden");
+}
+function closeSetup() { $("overlay").classList.add("hidden"); }
+
+$("gear").onclick = openSetup;
+$("forget").onclick = () => { localStorage.removeItem(CFG); location.reload(); };
+$("save").onclick = async () => {
+  const base = $("base").value.trim().replace(/\/+$/, "");
+  const token = $("token").value.trim();
+  if (!base || !token) { $("setupErr").textContent = "Both fields are required."; return; }
+  saveCfg({ base, token });
+  closeSetup();
+  await run();
+};
+
+async function fetchDays(base, token) {
+  const res = await fetch(base + "/health", { headers: { Authorization: "Bearer " + token } });
+  if (res.status === 401) throw new Error("Token rejected — check for typos.");
+  if (!res.ok) throw new Error("Worker returned " + res.status + ".");
+  const data = await res.json();
+  return (data.days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1); // ascending
+}
+
+function mean(xs) { return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; }
+function fmt(n) { return n == null ? "—" : Math.round(n).toLocaleString(); }
+
+function trendWord(delta, goodIsUp) {
+  if (delta == null || Math.abs(delta) < 1e-9) return "holding steady";
+  const rising = delta > 0;
+  return rising ? "trending up" : "easing down";
+}
+
+function run() {
+  const c = loadCfg();
+  if (!c.base || !c.token) { openSetup(); $("loading").style.display = "none"; return; }
+  $("loading").style.display = "block";
+  $("loading").textContent = "Loading readout…";
+
+  return fetchDays(c.base, c.token).then(days => {
+    if (!days.length) {
+      $("app").innerHTML = '<div class="loading">No data stored yet. Run an export from Health Auto Export, then refresh.</div>';
+      return;
+    }
+    render(days);
+  }).catch(err => {
+    $("app").innerHTML = '<div class="loading">' + err.message + '</div>';
+    openSetup();
+    $("setupErr").textContent = err.message;
+  });
+}
+
+function splitPartial(days) {
+  const last = days[days.length - 1];
+  const isPartialToday = last.date === todayLocal();
+  const complete = isPartialToday ? days.slice(0, -1) : days;
+  return { complete, partial: isPartialToday ? last : null };
+}
+
+function weekAvgDelta(completeDays, field) {
+  const vals = completeDays.map(d => d[field]).filter(v => v != null);
+  const last7 = vals.slice(-7);
+  const prev7 = vals.slice(-14, -7);
+  const a = mean(last7), b = mean(prev7);
+  return { avg: a, delta: (a != null && b != null) ? a - b : null };
+}
+
+function render(days) {
+  $("app").innerHTML = "";
+  $("updated").textContent = "Updated " + new Date().toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  $("slots").style.display = "grid";
+
+  const { complete, partial } = splitPartial(days);
+
+  const stepsStat = weekAvgDelta(complete, "steps");
+  const rhrStat = weekAvgDelta(complete, "restingHeartRate");
+
+  // status thesis: lead with recovery if resting HR is elevated, else effort
+  const rhrUp = rhrStat.delta != null && rhrStat.delta > 1.5;
+  const lead = rhrUp ? "recovery" : "effort";
+  let verdict;
+  if (rhrUp) {
+    verdict = "Resting HR is <b>" + trendWord(rhrStat.delta) + "</b> — ease into the next hard session.";
+  } else {
+    verdict = "Steps <b>" + trendWord(stepsStat.delta) + "</b>, resting HR " + trendWord(rhrStat.delta) + " — recovery holding.";
+  }
+  const status = document.createElement("div");
+  status.className = "status " + lead;
+  status.innerHTML = '<div class="eyebrow">Today\u2019s read</div><div class="verdict">' + verdict + "</div>";
+  $("app").appendChild(status);
+
+  // panels
+  $("app").appendChild(metricPanel({
+    key: "steps", title: "Effort — steps", accent: "effort", field: "steps",
+    days, complete, partial, stat: stepsStat, unit: "steps", goodIsUp: true, kind: "bar",
+  }));
+  $("app").appendChild(metricPanel({
+    key: "rhr", title: "Recovery — resting HR", accent: "recovery", field: "restingHeartRate",
+    days, complete, partial, stat: rhrStat, unit: "bpm", goodIsUp: false, kind: "line",
+  }));
+
+  // Energy — only show once active-energy data actually exists
+  const hasActive = days.some(d => d.activeEnergy != null);
+  if (hasActive) {
+    const energyStat = weekAvgDelta(complete, "activeEnergy");
+
+    // Estimated TDEE = active + resting, averaged over complete days that have both
+    const tdeeVals = complete
+      .filter(d => d.activeEnergy != null && d.restingEnergy != null)
+      .map(d => d.activeEnergy + d.restingEnergy);
+    let subNote = "";
+    if (tdeeVals.length) {
+      const tdee = mean(tdeeVals.slice(-7));
+      subNote = 'Est. TDEE (active + resting) <b class="mono">' + fmt(tdee) + ' kcal</b> · watch estimate, trend not gospel';
+    }
+
+    $("app").appendChild(metricPanel({
+      key: "energy", title: "Effort — active energy", accent: "effort", field: "activeEnergy",
+      days, complete, partial, stat: energyStat, unit: "kcal", goodIsUp: true, kind: "bar",
+      subNote,
+    }));
+  }
+}
+
+function metricPanel(o) {
+  const panel = document.createElement("div");
+  panel.className = "panel";
+
+  // headline value: partial today if present, else latest complete day
+  const headVal = o.partial ? o.partial[o.field] : (o.complete.length ? o.complete[o.complete.length - 1][o.field] : null);
+  const showPartial = o.partial && o.partial[o.field] != null;
+
+  let deltaHtml = "";
+  if (o.stat.delta != null) {
+    const up = o.stat.delta > 0;
+    const arrow = up ? "▲" : "▼";
+    const mag = Math.abs(o.stat.delta);
+    deltaHtml = '<span class="arrow">' + arrow + "</span> " + fmt(mag) + " " + o.unit + " vs prior 7d";
+  }
+
+  panel.innerHTML =
+    '<div class="panel-head">' +
+      '<div class="panel-title"><span class="dot ' + o.accent + '"></span>' + o.title + "</div>" +
+      '<div class="delta mono">' + deltaHtml + "</div>" +
+    "</div>" +
+    '<div class="figure"><span class="big mono">' + fmt(headVal) + "</span>" +
+      '<span class="unit">' + o.unit + "</span>" +
+      (showPartial ? '<span class="partial mono">today · partial</span>' : "") +
+    "</div>" +
+    '<p class="avg-note">7-day average <b class="mono">' + fmt(o.stat.avg) + " " + o.unit + "</b>" +
+      (showPartial ? " · today excluded until it closes" : "") +
+      (o.subNote ? "<br>" + o.subNote : "") + "</p>" +
+    '<div class="chart-wrap"><canvas></canvas></div>';
+
+  // draw after it's in the DOM
+  const canvas = panel.querySelector("canvas");
+  requestAnimationFrame(() => drawChart(canvas, o));
+  return panel;
+}
+
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function drawChart(canvas, o) {
+  const last = o.days.slice(-14);
+  const labels = last.map(d => d.date.slice(5)); // MM-DD
+  const vals = last.map(d => d[o.field] ?? null);
+  const partialDate = o.partial ? o.partial.date : null;
+
+  const accent = cssVar("--" + o.accent);
+  const soft = cssVar("--" + o.accent + "-soft");
+  const grid = cssVar("--line");
+  const tick = cssVar("--text-faint");
+  const mono = '"IBM Plex Mono", monospace';
+
+  if (charts[o.key]) charts[o.key].destroy();
+
+  const common = {
+    labels,
+    datasets: [{
+      data: vals,
+      borderColor: accent,
+      backgroundColor: o.kind === "bar"
+        ? last.map(d => d.date === partialDate ? soft : accent)
+        : soft,
+      borderWidth: o.kind === "line" ? 2 : 0,
+      borderRadius: o.kind === "bar" ? 3 : 0,
+      pointRadius: o.kind === "line" ? last.map(d => d.date === partialDate ? 0 : 2.5) : 0,
+      pointBackgroundColor: accent,
+      fill: o.kind === "line",
+      tension: 0.32,
+      spanGaps: true,
+    }],
+  };
+
+  charts[o.key] = new Chart(canvas.getContext("2d"), {
+    type: o.kind,
+    data: common,
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 500 },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#0f1216", borderColor: grid, borderWidth: 1,
+          titleFont: { family: mono, size: 11 }, bodyFont: { family: mono, size: 12 },
+          padding: 10, displayColors: false,
+          callbacks: { label: (i) => fmt(i.raw) + " " + o.unit },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { display: false },
+             ticks: { color: tick, font: { family: mono, size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 6 } },
+        y: { grid: { color: grid, drawTicks: false }, border: { display: false },
+             ticks: { color: tick, font: { family: mono, size: 10 }, maxTicksLimit: 4,
+                      callback: (v) => v >= 1000 ? (v / 1000) + "k" : v } },
+      },
+    },
+  });
+}
+
+// keyboard: Esc closes setup
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSetup(); });
+
+run();
+</script>
+</body>
+</html>
