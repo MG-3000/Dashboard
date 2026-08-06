@@ -129,6 +129,8 @@
   <div class="loading" id="loading">Loading readout…</div>
 </div>
 
+<div id="nutrition"></div>
+
 <div id="oura"></div>
 
 <div class="slots" id="slots" style="display:none">
@@ -217,6 +219,7 @@ function run() {
       return;
     }
     render(days);
+    loadNutrition(c);
     loadOura(c);
   }).catch(err => {
     $("app").innerHTML = '<div class="loading">' + err.message + '</div>';
@@ -391,6 +394,44 @@ function drawChart(canvas, o) {
       },
     },
   });
+}
+
+// ─── Nutrition (pushed from the tracker) ───
+async function loadNutrition(c) {
+  const box = $("nutrition");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/nutrition", { headers: { Authorization: "Bearer " + c.token } });
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    renderNutrition((days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1));
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderNutrition(all) {
+  const box = $("nutrition");
+  box.innerHTML = "";
+  if (!all.length) return;
+
+  const last = all[all.length - 1];
+  const isPartial = last.date === todayLocal();
+  const complete = isPartial ? all.slice(0, -1) : all;
+  const partial = isPartial ? last : null;
+
+  const proteinStat = weekAvgDelta(complete, "protein");
+  const calAvg = mean(complete.map(d => d.calories).filter(v => v != null).slice(-7));
+  const calToday = (partial && partial.calories != null) ? partial.calories
+                 : (complete.length ? complete[complete.length - 1].calories : null);
+
+  let sub = "";
+  if (calToday != null) sub = 'Calories <b class="mono">' + fmt(calToday) + "</b>" + (partial ? " so far today" : "");
+  if (calAvg != null) sub += (sub ? " · " : "") + '7-day avg <b class="mono">' + fmt(calAvg) + "</b>";
+
+  box.appendChild(metricPanel({
+    key: "protein", title: "Fuel — protein", accent: "effort", field: "protein",
+    days: all, complete, partial, stat: proteinStat, unit: "g", goodIsUp: true, kind: "bar",
+    subNote: sub,
+  }));
 }
 
 // keyboard: Esc closes setup
