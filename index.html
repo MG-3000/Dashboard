@@ -22,6 +22,8 @@
     --effort-soft: rgba(232,163,61,0.14);
     --recovery: #46b3a6;    /* recovery: resting HR, sleep */
     --recovery-soft: rgba(70,179,166,0.14);
+    --body: #b6a6e8;        /* outcome: weight / body fat / waist */
+    --body-soft: rgba(182,166,232,0.14);
   }
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
@@ -61,6 +63,16 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; }
   .dot.effort { background: var(--effort); }
   .dot.recovery { background: var(--recovery); }
+  .dot.body { background: var(--body); }
+  .copybar { display: flex; gap: 8px; margin: -14px 0 26px; }
+  .copybtn {
+    flex: 1; padding: 11px; border: 1px solid var(--line-strong); border-radius: 11px;
+    background: var(--panel); color: var(--text); font-size: 14px; font-weight: 500; cursor: pointer;
+    font-family: inherit; transition: background 0.15s;
+  }
+  .copybtn:hover { background: var(--panel-2); }
+  .copybtn.done { color: var(--recovery); border-color: var(--recovery); }
+  .copybtn:focus-visible { outline: 2px solid var(--recovery); outline-offset: 2px; }
   .delta { font-size: 12px; letter-spacing: 0.02em; color: var(--text-dim); }
   .delta .arrow { font-weight: 500; }
 
@@ -125,9 +137,15 @@
 </header>
 <p class="updated mono" id="updated">&nbsp;</p>
 
+<div class="copybar">
+  <button class="copybtn" id="copyBtn">⧉ Copy for Claude</button>
+</div>
+
 <div id="app">
   <div class="loading" id="loading">Loading readout…</div>
 </div>
+
+<div id="weight"></div>
 
 <div id="nutrition"></div>
 
@@ -162,6 +180,7 @@
 <script>
 const CFG = "recomp_cfg_v1";
 const DEFAULT_BASE = "https://health-sync.mark-guidi-2.workers.dev";
+const DATA = { health: [], oura: [], nutrition: [], weight: [] };
 
 const $ = (id) => document.getElementById(id);
 let charts = {};
@@ -180,6 +199,7 @@ function openSetup() {
 function closeSetup() { $("overlay").classList.add("hidden"); }
 
 $("gear").onclick = openSetup;
+$("copyBtn").onclick = onCopy;
 $("forget").onclick = () => { localStorage.removeItem(CFG); location.reload(); };
 $("save").onclick = async () => {
   const base = $("base").value.trim().replace(/\/+$/, "");
@@ -218,7 +238,9 @@ function run() {
       $("app").innerHTML = '<div class="loading">No data stored yet. Run an export from Health Auto Export, then refresh.</div>';
       return;
     }
+    DATA.health = days;
     render(days);
+    loadWeight(c);
     loadNutrition(c);
     loadOura(c);
   }).catch(err => {
@@ -404,7 +426,9 @@ async function loadNutrition(c) {
     const res = await fetch(c.base + "/nutrition", { headers: { Authorization: "Bearer " + c.token } });
     if (!res.ok) { box.innerHTML = ""; return; }
     const { days } = await res.json();
-    renderNutrition((days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1));
+    const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    DATA.nutrition = clean;
+    renderNutrition(clean);
   } catch (e) { box.innerHTML = ""; }
 }
 
@@ -434,6 +458,115 @@ function renderNutrition(all) {
   }));
 }
 
+// ─── Body metrics (weight / BF / waist) ───
+async function loadWeight(c) {
+  const box = $("weight");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/weight", { headers: { Authorization: "Bearer " + c.token } });
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    DATA.weight = clean;
+    renderWeight(clean);
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderWeight(all) {
+  const box = $("weight");
+  box.innerHTML = "";
+  const wdays = all.filter(d => d.weight != null);
+  if (!wdays.length) return;
+  const stat = weekAvgDelta(wdays, "weight");
+  const latest = wdays[wdays.length - 1];
+  const bits = [];
+  if (latest.bodyFat != null) bits.push('BF <b class="mono">' + latest.bodyFat + "%</b>");
+  if (latest.waist != null) bits.push('Waist <b class="mono">' + latest.waist + " in</b>");
+  box.appendChild(metricPanel({
+    key: "weight", title: "Body — weight", accent: "body", field: "weight",
+    days: wdays, complete: wdays, partial: null, stat, unit: "lb", goodIsUp: false, kind: "line",
+    subNote: bits.join(" · "),
+  }));
+}
+
+// ─── Copy for Claude ───
+function fnum(v, dp) { return v == null ? "—" : (dp ? (+v).toFixed(dp) : Math.round(v)); }
+function fk(v) { return v == null ? "—" : Math.round(v).toLocaleString(); }
+function forDate(arr, date, f) { const d = arr.find(x => x.date === date); return d && d[f] != null ? d[f] : null; }
+function latestObj(arr, f) { for (let i = arr.length - 1; i >= 0; i--) if (arr[i][f] != null) return arr[i]; return null; }
+function latestVal(arr, f) { const d = latestObj(arr, f); return d ? d[f] : null; }
+function avgN(arr, f, n, excludeDate) {
+  const vals = arr.filter(d => d[f] != null && d.date !== excludeDate).map(d => d[f]).slice(-n);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+function buildSummary() {
+  const t = todayLocal();
+  const { health: H, nutrition: N, oura: O, weight: W } = DATA;
+  const L = [];
+  L.push("COACHING SNAPSHOT — " + t);
+  L.push("");
+
+  L.push("TODAY (partial)");
+  L.push("Steps " + fk(forDate(H, t, "steps")) + " · Active " + fnum(forDate(H, t, "activeEnergy")) + " kcal");
+  const nToday = N.find(d => d.date === t);
+  if (nToday) L.push("Nutrition so far: " + fk(nToday.calories) + " kcal · " + fnum(nToday.protein) + "P " + fnum(nToday.carbs) + "C " + fnum(nToday.fat) + "F");
+  else L.push("Nutrition so far: none logged yet");
+  L.push("");
+
+  const wl = latestObj(W, "weight");
+  L.push("BODY" + (wl ? " (" + wl.date + ")" : ""));
+  if (wl) {
+    let line = "Weight " + fnum(wl.weight, 1) + " lb";
+    if (wl.bodyFat != null) line += " · BF " + fnum(wl.bodyFat, 1) + "%";
+    if (wl.waist != null) line += " · Waist " + fnum(wl.waist, 1) + " in";
+    L.push(line);
+    const wv = W.filter(d => d.weight != null).map(d => d.weight);
+    if (wv.length >= 2) {
+      const first = wv[Math.max(0, wv.length - 7)], last = wv[wv.length - 1], dc = last - first;
+      L.push("7-day weight: " + fnum(first, 1) + " → " + fnum(last, 1) + " (" + (dc >= 0 ? "+" : "") + dc.toFixed(1) + " lb)");
+    }
+  } else L.push("No weight logged yet — add a morning check-in in the tracker.");
+  L.push("");
+
+  L.push("RECOVERY (last night)");
+  L.push("Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
+         " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate")));
+  L.push("");
+
+  L.push("7-DAY AVERAGES (today excluded)");
+  const actAvg = avgN(H, "activeEnergy", 7, t), restAvg = avgN(H, "restingEnergy", 7, t);
+  const tdee = (actAvg != null && restAvg != null) ? actAvg + restAvg : null;
+  L.push("Steps " + fk(avgN(H, "steps", 7, t)) + "/day · Active " + fnum(actAvg) + " kcal/day" + (tdee != null ? " · Est TDEE " + fk(tdee) : ""));
+  L.push("Nutrition " + fk(avgN(N, "calories", 7, t)) + " kcal · " + fnum(avgN(N, "protein", 7, t)) + "P /day");
+  L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
+         " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(H, "restingHeartRate", 7)));
+  L.push("");
+  L.push("(From the Recomp dashboard — moderate cut toward 15%. Give me my daily brief: yesterday's verdict, today's setup, one adjustment.)");
+  return L.join("\n");
+}
+
+async function onCopy() {
+  const btn = $("copyBtn");
+  const text = buildSummary();
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = "Copied ✓ — paste into Claude";
+    btn.classList.add("done");
+    setTimeout(() => { btn.textContent = "⧉ Copy for Claude"; btn.classList.remove("done"); }, 2600);
+  } catch (e) {
+    const ov = document.createElement("div");
+    ov.className = "overlay";
+    ov.innerHTML = '<div class="setup"><h2>Copy this</h2><p>Select all, copy, and paste into Claude.</p>' +
+      '<textarea readonly style="width:100%;min-height:240px;background:var(--ink);border:1px solid var(--line-strong);border-radius:10px;color:var(--text);padding:11px;font-family:monospace;font-size:12px"></textarea>' +
+      '<button id="fbClose">Done</button></div>';
+    ov.querySelector("textarea").value = text;
+    document.body.appendChild(ov);
+    const ta = ov.querySelector("textarea"); ta.focus(); ta.select();
+    ov.querySelector("#fbClose").onclick = () => ov.remove();
+  }
+}
+
 // keyboard: Esc closes setup
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSetup(); });
 
@@ -446,7 +579,9 @@ async function loadOura(c) {
     if (res.status === 409) { box.innerHTML = ouraConnectCard(c.base); return; }
     if (!res.ok) { box.innerHTML = ""; return; }
     const { days } = await res.json();
-    renderOura((days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1));
+    const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    DATA.oura = clean;
+    renderOura(clean);
   } catch (e) { box.innerHTML = ""; }
 }
 
