@@ -576,6 +576,45 @@ function buildSummary() {
   L.push("Nutrition " + fk(avgN(N, "calories", 7, t)) + " kcal · " + fnum(avgN(N, "protein", 7, t)) + "P /day");
   L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
          " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(H, "restingHeartRate", 7)));
+
+  // TIMING (today) — protein distribution + peri-workout + workout times
+  const timing = [];
+  const nT = N.find(d => d.date === t);
+  if (nT && Array.isArray(nT.meals) && nT.meals.length) {
+    const meals = nT.meals.slice().sort((a, b) => (a.t < b.t ? -1 : 1));
+    const buckets = { am: 0, mid: 0, eve: 0 };
+    for (const m of meals) {
+      const hr = parseInt((m.t || "12:00").slice(0, 2), 10);
+      if (hr < 11) buckets.am += m.p || 0;
+      else if (hr < 16) buckets.mid += m.p || 0;
+      else buckets.eve += m.p || 0;
+    }
+    const mealStr = meals.map(m =>
+      m.t + " " + (m.meal ? m.meal.slice(0, 3) : "") + " (P" + (m.p || 0) + (m.wk ? "," + m.wk : "") + ")"
+    ).join(" · ");
+    timing.push("Meals: " + mealStr);
+    const total = buckets.am + buckets.mid + buckets.eve;
+    let shape = "even";
+    if (total > 0) {
+      if (buckets.eve / total > 0.5) shape = "backloaded";
+      else if (buckets.am / total > 0.45) shape = "frontloaded";
+    }
+    timing.push("Protein spread: AM " + buckets.am + " / mid " + buckets.mid + " / eve " + buckets.eve + " \u2192 " + shape);
+  }
+  const wT = (DATA.workouts || []).find(d => d.date === t);
+  if (wT && Array.isArray(wT.workouts) && wT.workouts.length) {
+    const ws = wT.workouts.map(w => {
+      const start = (w.start || "").replace("T", " ").slice(11, 16);
+      return (w.type || "Workout") + (start ? " " + start : "") + (w.minutes ? " (" + w.minutes + "m)" : "");
+    }).join(" · ");
+    timing.push("Workouts: " + ws);
+  }
+  if (timing.length) {
+    L.push("");
+    L.push("TIMING (today)");
+    for (const line of timing) L.push(line);
+  }
+
   L.push("");
   L.push("(From the Recomp dashboard — moderate cut toward 15%. Give me my daily brief: yesterday's verdict, today's setup, one adjustment.)");
   return L.join("\n");
