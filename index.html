@@ -84,6 +84,13 @@
   .avg-note b { color: var(--text-dim); font-weight: 500; }
   .chart-wrap { position: relative; height: 128px; }
 
+  .wo-row { display: flex; align-items: baseline; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
+  .wo-row:first-of-type { border-top: none; }
+  .wo-date { color: var(--text-faint); font-size: 12px; width: 42px; flex-shrink: 0; }
+  .wo-type { flex: 1; font-size: 14px; color: var(--text); }
+  .wo-meta { color: var(--text-dim); font-size: 12px; }
+  .wo-empty { color: var(--text-faint); font-size: 13px; line-height: 1.5; padding: 4px 0; }
+
   /* future / not-yet-connected slots */
   .slots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 24px; }
   .slot {
@@ -145,22 +152,11 @@
   <div class="loading" id="loading">Loading readout…</div>
 </div>
 
-<div id="weight"></div>
-
+<div id="deficit"></div>
 <div id="nutrition"></div>
-
+<div id="weight"></div>
+<div id="workouts"></div>
 <div id="oura"></div>
-
-<div class="slots" id="slots" style="display:none">
-  <div class="slot">
-    <div class="s-title">Nutrition</div>
-    <div class="s-hint">Protein &amp; calories from the nutrition app.</div>
-  </div>
-  <div class="slot">
-    <div class="s-title">Training</div>
-    <div class="s-hint">Top sets &amp; volume from the workout tracker.</div>
-  </div>
-</div>
 
 <!-- setup -->
 <div class="overlay" id="overlay">
@@ -180,7 +176,7 @@
 <script>
 const CFG = "recomp_cfg_v1";
 const DEFAULT_BASE = "https://health-sync.mark-guidi-2.workers.dev";
-const DATA = { health: [], oura: [], nutrition: [], weight: [] };
+const DATA = { health: [], oura: [], nutrition: [], weight: [], workouts: [] };
 
 const $ = (id) => document.getElementById(id);
 let charts = {};
@@ -242,6 +238,7 @@ function run() {
     render(days);
     loadWeight(c);
     loadNutrition(c);
+    loadWorkouts(c);
     loadOura(c);
   }).catch(err => {
     $("app").innerHTML = '<div class="loading">' + err.message + '</div>';
@@ -268,7 +265,6 @@ function weekAvgDelta(completeDays, field) {
 function render(days) {
   $("app").innerHTML = "";
   $("updated").textContent = "Updated " + new Date().toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  $("slots").style.display = "grid";
 
   const { complete, partial } = splitPartial(days);
 
@@ -360,11 +356,30 @@ function metricPanel(o) {
 
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
+const WINDOW = 10; // every chart shows the same trailing N days
+
+// Build a continuous date axis for the last WINDOW days, aligned across all panels.
+// Bars zero-fill missing days (unless zeroFill:false); lines leave gaps.
+function windowSeries(days, field, kind, zeroFill) {
+  const today = new Date(todayLocal() + "T00:00:00");
+  const byDate = {};
+  for (const d of days) byDate[d.date] = d;
+  const dates = [], labels = [], vals = [];
+  for (let i = WINDOW - 1; i >= 0; i--) {
+    const dt = new Date(today); dt.setDate(dt.getDate() - i);
+    const key = dt.toLocaleDateString("en-CA");
+    dates.push(key); labels.push(key.slice(5));
+    const rec = byDate[key];
+    const v = rec && rec[field] != null ? rec[field] : null;
+    vals.push(v == null && kind === "bar" && zeroFill ? 0 : v);
+  }
+  return { dates, labels, vals };
+}
+
 function drawChart(canvas, o) {
-  const last = o.days.slice(-14);
-  const labels = last.map(d => d.date.slice(5)); // MM-DD
-  const vals = last.map(d => d[o.field] ?? null);
-  const partialDate = o.partial ? o.partial.date : null;
+  const zeroFill = o.zeroFill !== false;
+  const { dates, labels, vals } = windowSeries(o.days, o.field, o.kind, zeroFill);
+  const partialDate = o.partial ? o.partial.date : todayLocal();
 
   const accent = cssVar("--" + o.accent);
   const soft = cssVar("--" + o.accent + "-soft");
@@ -380,11 +395,11 @@ function drawChart(canvas, o) {
       data: vals,
       borderColor: accent,
       backgroundColor: o.kind === "bar"
-        ? last.map(d => d.date === partialDate ? soft : accent)
+        ? dates.map(dt => dt === partialDate ? soft : accent)
         : soft,
       borderWidth: o.kind === "line" ? 2 : 0,
       borderRadius: o.kind === "bar" ? 3 : 0,
-      pointRadius: o.kind === "line" ? last.map(d => d.date === partialDate ? 0 : 2.5) : 0,
+      pointRadius: o.kind === "line" ? dates.map(dt => dt === partialDate ? 0 : 2.5) : 0,
       pointBackgroundColor: accent,
       fill: o.kind === "line",
       tension: 0.32,
@@ -429,6 +444,7 @@ async function loadNutrition(c) {
     const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
     DATA.nutrition = clean;
     renderNutrition(clean);
+    renderDeficit();
   } catch (e) { box.innerHTML = ""; }
 }
 
@@ -530,9 +546,28 @@ function buildSummary() {
   L.push("");
 
   L.push("RECOVERY (last night)");
-  L.push("Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
-         " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate")));
+  const ol = latestObj(O, "sleepScore") || {};
+  let recLine = "Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
+         " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate"));
+  L.push(recLine);
+  const stageBits = [];
+  if (ol.deepSleep != null) stageBits.push("Deep " + ol.deepSleep.toFixed(1) + "h");
+  if (ol.remSleep != null) stageBits.push("REM " + ol.remSleep.toFixed(1) + "h");
+  if (ol.lightSleep != null) stageBits.push("Light " + ol.lightSleep.toFixed(1) + "h");
+  if (stageBits.length) L.push("Sleep stages: " + stageBits.join(" · "));
+  const tempD = latestVal(O, "tempDev");
+  if (tempD != null) L.push("Body temp deviation: " + (tempD >= 0 ? "+" : "") + tempD.toFixed(1) + "°C" + (Math.abs(tempD) >= 0.5 ? "  (elevated — possible illness/strain)" : ""));
   L.push("");
+
+  // recent workouts
+  const woRecent = (DATA.workouts || []).slice(-3).reverse();
+  if (woRecent.length) {
+    L.push("RECENT WORKOUTS");
+    for (const day of woRecent) for (const w of (day.workouts || [])) {
+      L.push(day.date + ": " + w.type + (w.minutes != null ? " · " + w.minutes + " min" : "") + (w.energy != null ? " · " + Math.round(w.energy) + " kcal" : ""));
+    }
+    L.push("");
+  }
 
   L.push("7-DAY AVERAGES (today excluded)");
   const actAvg = avgN(H, "activeEnergy", 7, t), restAvg = avgN(H, "restingEnergy", 7, t);
@@ -600,17 +635,106 @@ function renderOura(oura) {
   const readyStat = weekAvgDelta(oura, "readinessScore");
   const hrvAvg = mean(oura.map(d => d.hrv).filter(v => v != null).slice(-7));
   const hoursAvg = mean(oura.map(d => d.sleepHours).filter(v => v != null).slice(-7));
+  const latest = oura[oura.length - 1] || {};
+
+  // sleep stages on the latest night
+  let sleepSub = hoursAvg != null ? 'Avg sleep <b class="mono">' + hoursAvg.toFixed(1) + " h</b>" : "";
+  if (latest.deepSleep != null || latest.remSleep != null) {
+    const bits = [];
+    if (latest.deepSleep != null) bits.push('Deep <b class="mono">' + latest.deepSleep.toFixed(1) + "h</b>");
+    if (latest.remSleep != null) bits.push('REM <b class="mono">' + latest.remSleep.toFixed(1) + "h</b>");
+    sleepSub += (sleepSub ? " · " : "") + "last night " + bits.join(" · ");
+  }
+
+  // temperature deviation is a quiet illness/overtraining flag
+  let readySub = hrvAvg != null ? 'Avg HRV <b class="mono">' + Math.round(hrvAvg) + " ms</b>" : "HRV — filling in as nights sync";
+  if (latest.tempDev != null) {
+    const t = latest.tempDev;
+    readySub += ' · Temp <b class="mono">' + (t >= 0 ? "+" : "") + t.toFixed(1) + "°</b>" + (Math.abs(t) >= 0.5 ? " ⚠" : "");
+  }
 
   box.appendChild(metricPanel({
     key: "sleep", title: "Recovery — sleep score", accent: "recovery", field: "sleepScore",
     days: oura, complete: oura, partial: null, stat: sleepStat, unit: "", goodIsUp: true, kind: "line",
-    subNote: hoursAvg != null ? 'Avg sleep <b class="mono">' + hoursAvg.toFixed(1) + " h</b>" : "",
+    subNote: sleepSub,
   }));
   box.appendChild(metricPanel({
     key: "readiness", title: "Recovery — readiness", accent: "recovery", field: "readinessScore",
     days: oura, complete: oura, partial: null, stat: readyStat, unit: "", goodIsUp: true, kind: "line",
-    subNote: hrvAvg != null ? 'Avg HRV <b class="mono">' + Math.round(hrvAvg) + " ms</b>" : "HRV — filling in as nights sync",
+    subNote: readySub,
   }));
+}
+
+// ─── Energy balance (calories in vs out) ───
+function renderDeficit() {
+  const box = $("deficit");
+  if (!box) return;
+  box.innerHTML = "";
+  const H = DATA.health, N = DATA.nutrition;
+  if (!N.length || !H.length) return;
+
+  const nByDate = {}; for (const d of N) nByDate[d.date] = d;
+  const hByDate = {}; for (const d of H) hByDate[d.date] = d;
+  const today = todayLocal();
+
+  const rows = [];
+  for (const date of Object.keys(nByDate)) {
+    if (date === today) continue; // partial intake makes today's balance misleading
+    const n = nByDate[date], h = hByDate[date];
+    if (!n || n.calories == null || !h || h.activeEnergy == null || h.restingEnergy == null) continue;
+    const tdee = h.activeEnergy + h.restingEnergy;
+    rows.push({ date, deficit: Math.round(n.calories - tdee), intake: n.calories, tdee: Math.round(tdee) });
+  }
+  rows.sort((a, b) => a.date < b.date ? -1 : 1);
+  if (!rows.length) return;
+
+  const stat = weekAvgDelta(rows, "deficit");
+  const latest = rows[rows.length - 1];
+  const sub = 'Latest: in <b class="mono">' + fk(latest.intake) + "</b> · out <b class=\"mono\">" + fk(latest.tdee) +
+    "</b> → <b class=\"mono\">" + (latest.deficit >= 0 ? "+" : "") + fk(latest.deficit) + "</b> kcal";
+
+  box.appendChild(metricPanel({
+    key: "deficit", title: "Energy balance — in minus out", accent: "effort", field: "deficit",
+    days: rows, complete: rows, partial: null, stat, unit: "kcal", goodIsUp: false, kind: "bar",
+    subNote: sub + ' · negative = deficit · watch estimate, scale is truth', zeroFill: false,
+  }));
+}
+
+// ─── Workouts (type + duration from Apple Health) ───
+async function loadWorkouts(c) {
+  const box = $("workouts");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/workouts", { headers: { Authorization: "Bearer " + c.token } });
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    DATA.workouts = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    renderWorkouts(DATA.workouts);
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderWorkouts(days) {
+  const box = $("workouts");
+  box.innerHTML = "";
+  const recent = days.slice(-6).reverse();
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  let rows = "";
+  if (!recent.length) {
+    rows = '<div class="wo-empty">No workouts yet. Add a Health Auto Export automation with Data Type = Workouts pointing at your Worker.</div>';
+  } else {
+    for (const day of recent) {
+      for (const w of (day.workouts || [])) {
+        const dur = w.minutes != null ? w.minutes + " min" : "";
+        const en = w.energy != null ? Math.round(w.energy) + " kcal" : "";
+        rows += '<div class="wo-row"><span class="wo-date mono">' + day.date.slice(5) + '</span>' +
+          '<span class="wo-type">' + w.type + '</span>' +
+          '<span class="wo-meta mono">' + [dur, en].filter(Boolean).join(" · ") + '</span></div>';
+      }
+    }
+  }
+  panel.innerHTML = '<div class="panel-head"><div class="panel-title"><span class="dot effort"></span>Training — recent sessions</div></div>' + rows;
+  box.appendChild(panel);
 }
 
 run();
