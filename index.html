@@ -589,10 +589,19 @@ function buildSummary() {
       else if (hr < 16) buckets.mid += m.p || 0;
       else buckets.eve += m.p || 0;
     }
-    const mealStr = meals.map(m =>
-      m.t + " " + (m.meal ? m.meal.slice(0, 3) : "") + " (P" + (m.p || 0) + (m.wk ? "," + m.wk : "") + ")"
-    ).join(" · ");
-    timing.push("Meals: " + mealStr);
+    // one line per item with full macros — carbs first (the glucose driver)
+    for (const m of meals) {
+      const label = m.meal ? m.meal.slice(0, 3) : "";
+      const wk = m.wk ? " [" + m.wk + "]" : "";
+      const name = m.name ? " " + m.name : "";
+      const macro = [
+        m.c != null ? m.c + "C" : null,
+        m.cal != null ? m.cal + "cal" : null,
+        m.p != null ? m.p + "P" : null,
+        m.f != null ? m.f + "F" : null,
+      ].filter(Boolean).join(" ");
+      timing.push(m.t + " " + label + wk + name + (macro ? " · " + macro : ""));
+    }
     const total = buckets.am + buckets.mid + buckets.eve;
     let shape = "even";
     if (total > 0) {
