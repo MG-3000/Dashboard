@@ -547,16 +547,25 @@ function buildSummary() {
 
   L.push("RECOVERY (last night)");
   const ol = latestObj(O, "sleepScore") || {};
-  let recLine = "Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
-         " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate"));
-  L.push(recLine);
-  const stageBits = [];
-  if (ol.deepSleep != null) stageBits.push("Deep " + ol.deepSleep.toFixed(1) + "h");
-  if (ol.remSleep != null) stageBits.push("REM " + ol.remSleep.toFixed(1) + "h");
-  if (ol.lightSleep != null) stageBits.push("Light " + ol.lightSleep.toFixed(1) + "h");
-  if (stageBits.length) L.push("Sleep stages: " + stageBits.join(" · "));
-  const tempD = latestVal(O, "tempDev");
-  if (tempD != null) L.push("Body temp deviation: " + (tempD >= 0 ? "+" : "") + tempD.toFixed(1) + "°C" + (Math.abs(tempD) >= 0.5 ? "  (elevated — possible illness/strain)" : ""));
+  if (ol.preliminary) {
+    // Oura hasn't finalized last night yet — the guard blanked HRV/stages.
+    // Show scores (which are usually present) but flag the rest as pending so
+    // the brief doesn't treat a partial sync as real data.
+    L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
+           " · HRV pending · Resting HR pending");
+    L.push("⚠ Oura sync still finalizing last night — HRV/stages not yet reliable. Re-pull midday for the real numbers.");
+  } else {
+    let recLine = "Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
+           " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate"));
+    L.push(recLine);
+    const stageBits = [];
+    if (ol.deepSleep != null) stageBits.push("Deep " + ol.deepSleep.toFixed(1) + "h");
+    if (ol.remSleep != null) stageBits.push("REM " + ol.remSleep.toFixed(1) + "h");
+    if (ol.lightSleep != null) stageBits.push("Light " + ol.lightSleep.toFixed(1) + "h");
+    if (stageBits.length) L.push("Sleep stages: " + stageBits.join(" · "));
+    const tempD = latestVal(O, "tempDev");
+    if (tempD != null) L.push("Body temp deviation: " + (tempD >= 0 ? "+" : "") + tempD.toFixed(1) + "°C" + (Math.abs(tempD) >= 0.5 ? "  (elevated — possible illness/strain)" : ""));
+  }
   L.push("");
 
   // recent workouts
@@ -571,9 +580,15 @@ function buildSummary() {
 
   L.push("7-DAY AVERAGES (today excluded)");
   const actAvg = avgN(H, "activeEnergy", 7, t), restAvg = avgN(H, "restingEnergy", 7, t);
-  const tdee = (actAvg != null && restAvg != null) ? actAvg + restAvg : null;
-  L.push("Steps " + fk(avgN(H, "steps", 7, t)) + "/day · Active " + fnum(actAvg) + " kcal/day" + (tdee != null ? " · Est TDEE " + fk(tdee) : ""));
-  L.push("Nutrition " + fk(avgN(N, "calories", 7, t)) + " kcal · " + fnum(avgN(N, "protein", 7, t)) + "P /day");
+  const cal = calibrateMaintenance(N, DATA.weight || []);
+  const maintLabel = cal.ok ? (fk(cal.lo) + "–" + fk(cal.hi) + " (calibrated)") : "~2,450 (anchor)";
+  L.push("Steps " + fk(avgN(H, "steps", 7, t)) + "/day · Active " + fnum(actAvg) + " kcal/day");
+  L.push("Calibrated maintenance " + maintLabel + " · derived from scale, not watch");
+  const calAvg = avgN(N, "calories", 7, t);
+  const maintNum = cal.ok ? cal.maintenance : 2450;
+  const avgDelta = calAvg != null ? Math.round(calAvg - maintNum) : null;
+  L.push("Nutrition " + fk(calAvg) + " kcal · " + fnum(avgN(N, "protein", 7, t)) + "P /day" +
+         (avgDelta != null ? " · avg daily balance " + (avgDelta >= 0 ? "+" : "") + fk(avgDelta) + " kcal" : ""));
   L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
          " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(H, "restingHeartRate", 7)));
 
@@ -713,38 +728,120 @@ function renderOura(oura) {
   }));
 }
 
-// ─── Energy balance (calories in vs out) ───
+// ─── Energy balance (self-calibrating maintenance from the scale) ───
+// The watch's active+resting "TDEE" is inflated (~3,200) vs Mark's true
+// maintenance (~2,450, established from weight response). So instead of
+// trusting the watch, we BACK-SOLVE maintenance from ground truth:
+//   maintenance ≈ avg daily intake − (weight change in lb × 3500 ÷ days)
+// Over a long-enough window, water noise cancels and the weight-change term
+// approximates real tissue change, so this converges on true maintenance and
+// automatically tracks downward as bodyweight drops. Guardrails below stop a
+// short/watery window from poisoning the estimate.
+function calibrateMaintenance(N, W) {
+  const nByDate = {}; for (const d of N) if (d.calories != null) nByDate[d.date] = d.calories;
+  const wdays = W.filter(d => d.weight != null).sort((a, b) => a.date < b.date ? -1 : 1);
+  const today = todayLocal();
+
+  // Use the longest clean window we have, capped at 21 days, floored at 14.
+  // Under 14 days water noise dominates and the estimate is untrustworthy.
+  const MIN_DAYS = 14, MAX_DAYS = 21;
+  if (wdays.length < 2) return { ok: false, reason: "Need more weigh-ins" };
+
+  const first = wdays[0], last = wdays[wdays.length - 1];
+  const spanDays = Math.round((new Date(last.date) - new Date(first.date)) / 86400000);
+  if (spanDays < MIN_DAYS) return { ok: false, reason: "Keep logging — " + (MIN_DAYS - spanDays) + " more days for a reliable maintenance estimate" };
+
+  // Window: last MAX_DAYS of weight data
+  const cutoff = new Date(new Date(last.date) - MAX_DAYS * 86400000);
+  const wWin = wdays.filter(d => new Date(d.date) >= cutoff);
+  const wStart = wWin[0], wEnd = wWin[wWin.length - 1];
+  const winDays = Math.round((new Date(wEnd.date) - new Date(wStart.date)) / 86400000);
+  if (winDays < MIN_DAYS) return { ok: false, reason: "Keep logging for a reliable estimate" };
+
+  // Smooth endpoints with a 3-day average to blunt single-day water spikes.
+  const near = (arr, dateStr, f) => {
+    const target = new Date(dateStr);
+    const picks = arr.filter(d => Math.abs(new Date(d.date) - target) <= 2 * 86400000 && d[f] != null).map(d => d[f]);
+    return picks.length ? picks.reduce((a, b) => a + b, 0) / picks.length : null;
+  };
+  const wStartV = near(wWin, wStart.date, "weight");
+  const wEndV = near(wWin, wEnd.date, "weight");
+  const weightChange = wEndV - wStartV; // lb over the window (– = loss)
+
+  // Average intake over the SAME window (exclude today's partial log)
+  const intakes = [];
+  for (let i = 0; i <= winDays; i++) {
+    const ds = new Date(new Date(wStart.date).getTime() + i * 86400000).toLocaleDateString("en-CA");
+    if (ds === today) continue;
+    if (nByDate[ds] != null) intakes.push(nByDate[ds]);
+  }
+  if (intakes.length < MIN_DAYS - 2) return { ok: false, reason: "Not enough logged-food days in the window yet" };
+  const avgIntake = intakes.reduce((a, b) => a + b, 0) / intakes.length;
+
+  // Back-solve: maintenance = avg intake − (daily weight-change energy)
+  const dailyDeltaLb = weightChange / winDays;
+  const maintenance = avgIntake - dailyDeltaLb * 3500;
+
+  // Sanity clamp — reject physiologically implausible outputs (a watery window)
+  if (maintenance < 1800 || maintenance > 3200) {
+    return { ok: false, reason: "Recent water swings are distorting the estimate — needs a cleaner stretch", raw: Math.round(maintenance) };
+  }
+
+  // Report as a range (±120) to avoid false precision
+  return {
+    ok: true, maintenance: Math.round(maintenance),
+    lo: Math.round(maintenance - 120), hi: Math.round(maintenance + 120),
+    avgIntake: Math.round(avgIntake), weightChange: +weightChange.toFixed(1),
+    windowDays: winDays, intakeDays: intakes.length,
+  };
+}
+
 function renderDeficit() {
   const box = $("deficit");
   if (!box) return;
   box.innerHTML = "";
-  const H = DATA.health, N = DATA.nutrition;
-  if (!N.length || !H.length) return;
+  const H = DATA.health, N = DATA.nutrition, W = DATA.weight || [];
+  if (!N.length) return;
 
+  const cal = calibrateMaintenance(N, W);
   const nByDate = {}; for (const d of N) nByDate[d.date] = d;
-  const hByDate = {}; for (const d of H) hByDate[d.date] = d;
   const today = todayLocal();
 
+  // Maintenance to reckon against: calibrated if available, else our known ~2,450 anchor.
+  const maint = cal.ok ? cal.maintenance : 2450;
+
+  // Per-day delta = intake − calibrated maintenance (NOT watch TDEE).
   const rows = [];
   for (const date of Object.keys(nByDate)) {
-    if (date === today) continue; // partial intake makes today's balance misleading
-    const n = nByDate[date], h = hByDate[date];
-    if (!n || n.calories == null || !h || h.activeEnergy == null || h.restingEnergy == null) continue;
-    const tdee = h.activeEnergy + h.restingEnergy;
-    rows.push({ date, deficit: Math.round(n.calories - tdee), intake: n.calories, tdee: Math.round(tdee) });
+    if (date === today) continue;
+    const n = nByDate[date];
+    if (!n || n.calories == null) continue;
+    rows.push({ date, deficit: Math.round(n.calories - maint), intake: n.calories });
   }
   rows.sort((a, b) => a.date < b.date ? -1 : 1);
   if (!rows.length) return;
 
   const stat = weekAvgDelta(rows, "deficit");
   const latest = rows[rows.length - 1];
-  const sub = 'Latest: in <b class="mono">' + fk(latest.intake) + "</b> · out <b class=\"mono\">" + fk(latest.tdee) +
-    "</b> → <b class=\"mono\">" + (latest.deficit >= 0 ? "+" : "") + fk(latest.deficit) + "</b> kcal";
+
+  // Header line: the calibrated maintenance and how it was derived.
+  let calLine;
+  if (cal.ok) {
+    calLine = 'Calibrated maintenance <b class="mono">' + fk(cal.lo) + "–" + fk(cal.hi) +
+      '</b> kcal (from your last ' + cal.windowDays + "d: avg intake " + fk(cal.avgIntake) +
+      ", weight " + (cal.weightChange >= 0 ? "+" : "") + cal.weightChange + " lb)";
+  } else {
+    calLine = 'Maintenance <b class="mono">~2,450</b> kcal (anchor — ' + cal.reason + ")";
+  }
+  const sub = calLine + "<br>Latest day: in <b class=\"mono\">" + fk(latest.intake) +
+    "</b> vs maint <b class=\"mono\">" + fk(maint) + "</b> → <b class=\"mono\">" +
+    (latest.deficit >= 0 ? "+" : "") + fk(latest.deficit) + "</b> kcal · 7-day avg delta <b class=\"mono\">" +
+    (stat && stat.avg != null ? (stat.avg >= 0 ? "+" : "") + fk(stat.avg) : "—") + "</b>";
 
   box.appendChild(metricPanel({
-    key: "deficit", title: "Energy balance — in minus out", accent: "effort", field: "deficit",
+    key: "deficit", title: "Energy balance — intake vs calibrated maintenance", accent: "effort", field: "deficit",
     days: rows, complete: rows, partial: null, stat, unit: "kcal", goodIsUp: false, kind: "bar",
-    subNote: sub + ' · negative = deficit · watch estimate, scale is truth', zeroFill: false,
+    subNote: sub + ' · negative = real deficit · derived from the scale, not the watch', zeroFill: false,
   }));
 }
 
