@@ -152,6 +152,7 @@
   <div class="loading" id="loading">Loading readout…</div>
 </div>
 
+<div id="scorecard"></div>
 <div id="deficit"></div>
 <div id="nutrition"></div>
 <div id="weight"></div>
@@ -445,6 +446,7 @@ async function loadNutrition(c) {
     DATA.nutrition = clean;
     renderNutrition(clean);
     renderDeficit();
+    renderScorecard();
   } catch (e) { box.innerHTML = ""; }
 }
 
@@ -485,6 +487,7 @@ async function loadWeight(c) {
     const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
     DATA.weight = clean;
     renderWeight(clean);
+    renderScorecard();
   } catch (e) { box.innerHTML = ""; }
 }
 
@@ -726,6 +729,120 @@ function renderOura(oura) {
     days: oura, complete: oura, partial: null, stat: readyStat, unit: "", goodIsUp: true, kind: "line",
     subNote: readySub,
   }));
+}
+
+// ─── Scorecard: the proactive measurables (7-day avg intake, avg deficit, on-target count) ───
+function renderScorecard() {
+  const box = $("scorecard");
+  if (!box) return;
+  const N = DATA.nutrition || [], W = DATA.weight || [];
+  if (!N.length) { box.innerHTML = ""; return; }
+  const t = todayLocal();
+
+  // 7-day average intake (exclude today's partial log)
+  const avgIntake = avgN(N, "calories", 7, t);
+  const avgProt = avgN(N, "protein", 7, t);
+  if (avgIntake == null) { box.innerHTML = ""; return; }
+
+  // Calibrated maintenance (falls back to 2450 anchor if window not clean yet)
+  const cal = calibrateMaintenance(N, W);
+  const maint = cal.ok ? cal.maintenance : 2450;
+  const avgDeficit = Math.round(avgIntake - maint); // negative = deficit
+
+  // Days-on-target: of the last 7 logged days (excl today), how many ≤ 2100 kcal
+  const recent = N.filter(d => d.calories != null && d.date !== t).slice(-7);
+  const onTarget = recent.filter(d => d.calories <= 2100).length;
+  const proteinDays = recent.filter(d => d.protein != null && d.protein >= 180).length;
+
+  // Targets
+  const INTAKE_TARGET = 2100;
+  const DEF_LO = -375, DEF_HI = -250; // the band that yields ~0.5–0.75 lb/wk
+
+  // ── Outcome metric: smoothed 14-day weight trend (lb/week) ──
+  // The inputs above are what you DO; this is whether it's WORKING. Smooth both
+  // endpoints with a 3-day average so a single water day can't fake the trend.
+  let trendTxt = "—", trendColor = "var(--text-faint)", trendNote = "need ~14 days of weigh-ins";
+  const wd = W.filter(d => d.weight != null).sort((a, b) => a.date < b.date ? -1 : 1);
+  if (wd.length >= 2) {
+    const last = wd[wd.length - 1];
+    const spanFirst = new Date(new Date(last.date) - 14 * 86400000);
+    const win = wd.filter(d => new Date(d.date) >= spanFirst);
+    if (win.length >= 2) {
+      const days = Math.round((new Date(win[win.length - 1].date) - new Date(win[0].date)) / 86400000);
+      if (days >= 10) { // enough span for water to average out
+        const near = (dateStr) => {
+          const tgt = new Date(dateStr);
+          const p = win.filter(d => Math.abs(new Date(d.date) - tgt) <= 2 * 86400000).map(d => d.weight);
+          return p.reduce((a, b) => a + b, 0) / p.length;
+        };
+        const startV = near(win[0].date), endV = near(win[win.length - 1].date);
+        const perWeek = ((endV - startV) / days) * 7;
+        const losing = perWeek < 0;
+        const inBand = perWeek <= -0.4 && perWeek >= -0.9; // roughly the 0.5–0.75 goal w/ tolerance
+        trendTxt = (perWeek >= 0 ? "+" : "") + perWeek.toFixed(2) + " lb/wk";
+        trendColor = inBand ? "var(--recovery)" : (losing ? "var(--body)" : "var(--text-dim)");
+        trendNote = inBand ? "in the target loss range" :
+          (losing ? "losing, but outside the 0.5–0.75 target pace" :
+           "not losing over 14 days — check the inputs above");
+      } else {
+        trendNote = "need a longer clean stretch (" + days + "d so far)";
+      }
+    }
+  }
+
+  // Status coloring helpers
+  const intakeOk = avgIntake <= INTAKE_TARGET + 30;
+  const defOk = avgDeficit <= DEF_HI;            // at least -250
+  const defStrong = avgDeficit <= DEF_LO;        // deeper than -375 (watch it's not too aggressive)
+  const color = (ok) => ok ? "var(--recovery)" : "var(--text-dim)";
+
+  const maintNote = cal.ok
+    ? ("vs calibrated maintenance " + fk(cal.lo) + "–" + fk(cal.hi))
+    : ("vs ~2,450 anchor — " + (cal.reason || "calibrating") + "");
+
+  box.innerHTML =
+    '<div class="panel">' +
+      '<div class="panel-head"><div class="panel-title"><span class="dot effort"></span>SCORECARD — 7-day rolling</div></div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+        // Avg intake tile
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">AVG INTAKE / DAY</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(intakeOk) + '">' + fk(avgIntake) + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">target ≤ ' + fk(INTAKE_TARGET) + '</div>' +
+        '</div>' +
+        // Avg deficit tile
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">AVG DEFICIT / DAY</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(defOk) + '">' + (avgDeficit >= 0 ? "+" : "") + fk(avgDeficit) + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">target −250 to −375</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">' +
+        // Days on target
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">DAYS ≤ 2,100 (of ' + recent.length + ')</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(onTarget >= 6) + '">' + onTarget + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">aim 6 of 7</div>' +
+        '</div>' +
+        // Protein days
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">PROTEIN ≥180 (of ' + recent.length + ')</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(proteinDays >= 6) + '">' + proteinDays + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">avg ' + fnum(avgProt) + 'g/day</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:baseline;justify-content:space-between;padding:12px 2px 10px;margin-bottom:10px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">' +
+        '<div><span style="font-size:11px;color:var(--text-faint);letter-spacing:.03em">14-DAY WEIGHT TREND</span>' +
+        '<span style="font-size:11px;color:var(--text-faint);margin-left:8px">← the outcome these inputs should produce</span></div>' +
+        '<div class="mono" style="font-size:20px;color:' + trendColor + '">' + trendTxt + '</div>' +
+      '</div>' +
+      '<div style="font-size:12px;color:var(--text-faint);line-height:1.5">' +
+        maintNote + '. Deficit sharpens as the calibration window gets cleaner. Trend: ' + trendNote + '. ' +
+        (defStrong ? '⚠ Running deeper than −375 — verify it\'s real loss, not water, before trusting it.' :
+         (defOk ? 'On track for ~0.5–0.75 lb/week if the trend confirms.' :
+          'Deficit shallow — tighten the weekly average to widen it.')) +
+      '</div>' +
+    '</div>';
 }
 
 // ─── Energy balance (self-calibrating maintenance from the scale) ───
