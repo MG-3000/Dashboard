@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recomp — daily readout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --ink: #14171c;
+    --panel: #1b1f27;
+    --panel-2: #20252e;
+    --line: rgba(255,255,255,0.07);
+    --line-strong: rgba(255,255,255,0.12);
+    --text: #e7e9ec;
+    --text-dim: #868f9b;
+    --text-faint: #5b636e;
+    --effort: #e8a33d;      /* output / load: steps, training */
+    --effort-soft: rgba(232,163,61,0.14);
+    --recovery: #46b3a6;    /* recovery: resting HR, sleep */
+    --recovery-soft: rgba(70,179,166,0.14);
+    --body: #b6a6e8;        /* outcome: weight / body fat / waist */
+    --body-soft: rgba(182,166,232,0.14);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--ink); color: var(--text);
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 15px; line-height: 1.5;
+    padding: 28px 20px 64px; max-width: 720px; margin-inline: auto;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  /* header */
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; gap: 12px; }
+  h1 {
+    font-family: "Space Grotesk", sans-serif; font-weight: 700;
+    font-size: 26px; letter-spacing: -0.02em; margin: 0;
+  }
+  .gear { background: none; border: none; color: var(--text-faint); font-size: 18px; cursor: pointer; padding: 4px; line-height: 1; }
+  .gear:hover { color: var(--text-dim); }
+  .updated { color: var(--text-faint); font-size: 12px; margin: 0 0 28px; letter-spacing: 0.02em; }
+
+  /* status thesis line — the signature element */
+  .status {
+    border-left: 2px solid var(--line-strong); padding: 2px 0 2px 16px; margin: 0 0 30px;
+  }
+  .status .eyebrow { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px; }
+  .status .verdict { font-family: "Space Grotesk", sans-serif; font-size: 19px; font-weight: 500; letter-spacing: -0.01em; }
+  .status .verdict b { font-weight: 700; }
+  .status.effort { border-color: var(--effort); }
+  .status.recovery { border-color: var(--recovery); }
+
+  /* metric panels */
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px 20px 12px; margin-bottom: 16px; }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+  .panel-title { display: flex; align-items: center; gap: 8px; font-size: 13px; letter-spacing: 0.03em; color: var(--text-dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.effort { background: var(--effort); }
+  .dot.recovery { background: var(--recovery); }
+  .dot.body { background: var(--body); }
+  .copybar { display: flex; gap: 8px; margin: -14px 0 26px; }
+  .copybtn {
+    flex: 1; padding: 11px; border: 1px solid var(--line-strong); border-radius: 11px;
+    background: var(--panel); color: var(--text); font-size: 14px; font-weight: 500; cursor: pointer;
+    font-family: inherit; transition: background 0.15s;
+  }
+  .copybtn:hover { background: var(--panel-2); }
+  .copybtn.done { color: var(--recovery); border-color: var(--recovery); }
+  .copybtn:focus-visible { outline: 2px solid var(--recovery); outline-offset: 2px; }
+  .delta { font-size: 12px; letter-spacing: 0.02em; color: var(--text-dim); }
+  .delta .arrow { font-weight: 500; }
+
+  .figure { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 2px; }
+  .figure .big { font-size: 40px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; }
+  .figure .unit { font-size: 14px; color: var(--text-dim); padding-bottom: 4px; }
+  .figure .partial { font-size: 11px; color: var(--effort); padding-bottom: 6px; letter-spacing: 0.04em; }
+  .avg-note { font-size: 12px; color: var(--text-faint); margin: 0 0 14px; }
+  .avg-note b { color: var(--text-dim); font-weight: 500; }
+  .chart-wrap { position: relative; height: 128px; }
+
+  .wo-row { display: flex; align-items: baseline; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
+  .wo-row:first-of-type { border-top: none; }
+  .wo-date { color: var(--text-faint); font-size: 12px; width: 42px; flex-shrink: 0; }
+  .wo-type { flex: 1; font-size: 14px; color: var(--text); }
+  .wo-meta { color: var(--text-dim); font-size: 12px; }
+  .wo-empty { color: var(--text-faint); font-size: 13px; line-height: 1.5; padding: 4px 0; }
+
+  /* future / not-yet-connected slots */
+  .slots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 24px; }
+  .slot {
+    border: 1px dashed var(--line-strong); border-radius: 14px; padding: 16px 14px;
+    text-align: left; color: var(--text-faint);
+  }
+  .slot .s-title { font-size: 13px; color: var(--text-dim); margin-bottom: 4px; letter-spacing: 0.02em; }
+  .slot .s-hint { font-size: 11px; line-height: 1.4; }
+  @media (max-width: 560px) { .slots { grid-template-columns: 1fr; } }
+
+  /* Oura connect prompt (shown until authorized) */
+  .oura-connect { border: 1px dashed var(--recovery); border-radius: 16px; padding: 20px; margin-bottom: 16px; }
+  .oura-connect .s-title { color: var(--recovery); font-size: 14px; margin-bottom: 6px; letter-spacing: 0.02em; }
+  .oura-connect .s-body { color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+  .oura-connect a {
+    display: inline-block; margin-top: 12px; color: #06201d; background: var(--recovery);
+    font-size: 13px; font-weight: 600; text-decoration: none; padding: 8px 14px; border-radius: 9px;
+  }
+  .oura-connect a:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+  /* setup dialog */
+  .overlay { position: fixed; inset: 0; background: rgba(10,12,15,0.72); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 10; }
+  .overlay.hidden { display: none; }
+  .setup { background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 18px; padding: 24px; width: 100%; max-width: 380px; }
+  .setup h2 { font-family: "Space Grotesk", sans-serif; font-size: 19px; margin: 0 0 4px; }
+  .setup p { color: var(--text-dim); font-size: 13px; margin: 0 0 18px; }
+  .setup label { display: block; font-size: 12px; color: var(--text-dim); margin: 0 0 6px; letter-spacing: 0.03em; }
+  .setup input {
+    width: 100%; padding: 11px 12px; font-size: 15px; margin-bottom: 14px;
+    background: var(--ink); border: 1px solid var(--line-strong); border-radius: 10px; color: var(--text);
+    font-family: "IBM Plex Mono", monospace;
+  }
+  .setup input:focus, .gear:focus-visible, button:focus-visible { outline: 2px solid var(--recovery); outline-offset: 2px; }
+  .setup button {
+    width: 100%; padding: 12px; font-size: 15px; font-weight: 600; border: none; border-radius: 10px;
+    background: var(--recovery); color: #06201d; cursor: pointer; font-family: inherit;
+  }
+  .setup .err { color: #ff6b6b; font-size: 13px; margin: 10px 0 0; min-height: 18px; }
+  .setup .link { background: none; border: none; color: var(--text-faint); font-size: 12px; margin-top: 10px; cursor: pointer; padding: 4px; width: 100%; }
+
+  .loading { color: var(--text-dim); font-size: 14px; padding: 40px 0; text-align: center; }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Recomp</h1>
+  <button class="gear" id="gear" title="Settings" aria-label="Settings">⚙</button>
+</header>
+<p class="updated mono" id="updated">&nbsp;</p>
+
+<div class="copybar">
+  <button class="copybtn" id="copyBtn">⧉ Copy for Claude</button>
+</div>
+
+<div id="app">
+  <div class="loading" id="loading">Loading readout…</div>
+</div>
+
+<div id="scorecard"></div>
+<div id="deficit"></div>
+<div id="nutrition"></div>
+<div id="weight"></div>
+<div id="workouts"></div>
+<div id="oura"></div>
+
+<!-- setup -->
+<div class="overlay" id="overlay">
+  <div class="setup">
+    <h2>Connect your data</h2>
+    <p>Points at your health-sync Worker. Stored only on this device.</p>
+    <label for="base">Worker URL</label>
+    <input id="base" type="url" placeholder="https://health-sync.you.workers.dev" autocomplete="off" spellcheck="false">
+    <label for="token">Access token</label>
+    <input id="token" type="password" placeholder="Your HEALTH_TOKEN" autocomplete="current-password">
+    <button id="save">Show my readout</button>
+    <p class="err" id="setupErr"></p>
+    <button class="link" id="forget">Forget this device</button>
+  </div>
+</div>
+
+<script>
+const CFG = "recomp_cfg_v1";
+const DEFAULT_BASE = "https://health-sync.mark-guidi-2.workers.dev";
+const DATA = { health: [], oura: [], nutrition: [], weight: [], workouts: [] };
+
+const $ = (id) => document.getElementById(id);
+let charts = {};
+
+function loadCfg() { try { return JSON.parse(localStorage.getItem(CFG)) || {}; } catch { return {}; } }
+function saveCfg(c) { localStorage.setItem(CFG, JSON.stringify(c)); }
+function todayLocal() { return new Date().toLocaleDateString("en-CA"); } // YYYY-MM-DD in local tz
+
+function openSetup() {
+  const c = loadCfg();
+  $("base").value = c.base || DEFAULT_BASE;
+  $("token").value = c.token || "";
+  $("setupErr").textContent = "";
+  $("overlay").classList.remove("hidden");
+}
+function closeSetup() { $("overlay").classList.add("hidden"); }
+
+$("gear").onclick = openSetup;
+$("copyBtn").onclick = onCopy;
+$("forget").onclick = () => { localStorage.removeItem(CFG); location.reload(); };
+$("save").onclick = async () => {
+  const base = $("base").value.trim().replace(/\/+$/, "");
+  const token = $("token").value.trim();
+  if (!base || !token) { $("setupErr").textContent = "Both fields are required."; return; }
+  saveCfg({ base, token });
+  closeSetup();
+  await run();
+};
+
+async function fetchDays(base, token) {
+  const res = await fetch(base + "/health", { headers: { Authorization: "Bearer " + token } });
+  if (res.status === 401) throw new Error("Token rejected — check for typos.");
+  if (!res.ok) throw new Error("Worker returned " + res.status + ".");
+  const data = await res.json();
+  return (data.days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1); // ascending
+}
+
+function mean(xs) { return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; }
+function fmt(n) { return n == null ? "—" : Math.round(n).toLocaleString(); }
+
+function trendWord(delta, goodIsUp) {
+  if (delta == null || Math.abs(delta) < 1e-9) return "holding steady";
+  const rising = delta > 0;
+  return rising ? "trending up" : "easing down";
+}
+
+function run() {
+  const c = loadCfg();
+  if (!c.base || !c.token) { openSetup(); $("loading").style.display = "none"; return; }
+  $("loading").style.display = "block";
+  $("loading").textContent = "Loading readout…";
+
+  return fetchDays(c.base, c.token).then(days => {
+    if (!days.length) {
+      $("app").innerHTML = '<div class="loading">No data stored yet. Run an export from Health Auto Export, then refresh.</div>';
+      return;
+    }
+    DATA.health = days;
+    render(days);
+    loadWeight(c);
+    loadNutrition(c);
+    loadWorkouts(c);
+    loadOura(c);
+  }).catch(err => {
+    $("app").innerHTML = '<div class="loading">' + err.message + '</div>';
+    openSetup();
+    $("setupErr").textContent = err.message;
+  });
+}
+
+function splitPartial(days) {
+  const last = days[days.length - 1];
+  const isPartialToday = last.date === todayLocal();
+  const complete = isPartialToday ? days.slice(0, -1) : days;
+  return { complete, partial: isPartialToday ? last : null };
+}
+
+function weekAvgDelta(completeDays, field) {
+  const vals = completeDays.map(d => d[field]).filter(v => v != null);
+  const last7 = vals.slice(-7);
+  const prev7 = vals.slice(-14, -7);
+  const a = mean(last7), b = mean(prev7);
+  return { avg: a, delta: (a != null && b != null) ? a - b : null };
+}
+
+function render(days) {
+  $("app").innerHTML = "";
+  $("updated").textContent = "Updated " + new Date().toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+  const { complete, partial } = splitPartial(days);
+
+  const stepsStat = weekAvgDelta(complete, "steps");
+  const rhrStat = weekAvgDelta(complete, "restingHeartRate");
+
+  // status thesis: lead with recovery if resting HR is elevated, else effort
+  const rhrUp = rhrStat.delta != null && rhrStat.delta > 1.5;
+  const lead = rhrUp ? "recovery" : "effort";
+  let verdict;
+  if (rhrUp) {
+    verdict = "Resting HR is <b>" + trendWord(rhrStat.delta) + "</b> — ease into the next hard session.";
+  } else {
+    verdict = "Steps <b>" + trendWord(stepsStat.delta) + "</b>, resting HR " + trendWord(rhrStat.delta) + " — recovery holding.";
+  }
+  const status = document.createElement("div");
+  status.className = "status " + lead;
+  status.innerHTML = '<div class="eyebrow">Today\u2019s read</div><div class="verdict">' + verdict + "</div>";
+  $("app").appendChild(status);
+
+  // panels
+  $("app").appendChild(metricPanel({
+    key: "steps", title: "Effort — steps", accent: "effort", field: "steps",
+    days, complete, partial, stat: stepsStat, unit: "steps", goodIsUp: true, kind: "bar",
+  }));
+  $("app").appendChild(metricPanel({
+    key: "rhr", title: "Recovery — resting HR", accent: "recovery", field: "restingHeartRate",
+    days, complete, partial, stat: rhrStat, unit: "bpm", goodIsUp: false, kind: "line",
+  }));
+
+  // Energy — only show once active-energy data actually exists
+  const hasActive = days.some(d => d.activeEnergy != null);
+  if (hasActive) {
+    const energyStat = weekAvgDelta(complete, "activeEnergy");
+
+    // Estimated TDEE = active + resting, averaged over complete days that have both
+    const tdeeVals = complete
+      .filter(d => d.activeEnergy != null && d.restingEnergy != null)
+      .map(d => d.activeEnergy + d.restingEnergy);
+    let subNote = "";
+    if (tdeeVals.length) {
+      const tdee = mean(tdeeVals.slice(-7));
+      subNote = 'Est. TDEE (active + resting) <b class="mono">' + fmt(tdee) + ' kcal</b> · watch estimate, trend not gospel';
+    }
+
+    $("app").appendChild(metricPanel({
+      key: "energy", title: "Effort — active energy", accent: "effort", field: "activeEnergy",
+      days, complete, partial, stat: energyStat, unit: "kcal", goodIsUp: true, kind: "bar",
+      subNote,
+    }));
+  }
+}
+
+function metricPanel(o) {
+  const panel = document.createElement("div");
+  panel.className = "panel";
+
+  // headline value: partial today if present, else latest complete day
+  const headVal = o.partial ? o.partial[o.field] : (o.complete.length ? o.complete[o.complete.length - 1][o.field] : null);
+  const showPartial = o.partial && o.partial[o.field] != null;
+
+  let deltaHtml = "";
+  if (o.stat.delta != null) {
+    const up = o.stat.delta > 0;
+    const arrow = up ? "▲" : "▼";
+    const mag = Math.abs(o.stat.delta);
+    deltaHtml = '<span class="arrow">' + arrow + "</span> " + fmt(mag) + " " + o.unit + " vs prior 7d";
+  }
+
+  panel.innerHTML =
+    '<div class="panel-head">' +
+      '<div class="panel-title"><span class="dot ' + o.accent + '"></span>' + o.title + "</div>" +
+      '<div class="delta mono">' + deltaHtml + "</div>" +
+    "</div>" +
+    '<div class="figure"><span class="big mono">' + fmt(headVal) + "</span>" +
+      '<span class="unit">' + o.unit + "</span>" +
+      (showPartial ? '<span class="partial mono">today · partial</span>' : "") +
+    "</div>" +
+    '<p class="avg-note">7-day average <b class="mono">' + fmt(o.stat.avg) + " " + o.unit + "</b>" +
+      (showPartial ? " · today excluded until it closes" : "") +
+      (o.subNote ? "<br>" + o.subNote : "") + "</p>" +
+    '<div class="chart-wrap"><canvas></canvas></div>';
+
+  // draw after it's in the DOM
+  const canvas = panel.querySelector("canvas");
+  requestAnimationFrame(() => drawChart(canvas, o));
+  return panel;
+}
+
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+const WINDOW = 10; // every chart shows the same trailing N days
+
+// Build a continuous date axis for the last WINDOW days, aligned across all panels.
+// Bars zero-fill missing days (unless zeroFill:false); lines leave gaps.
+function windowSeries(days, field, kind, zeroFill) {
+  const today = new Date(todayLocal() + "T00:00:00");
+  const byDate = {};
+  for (const d of days) byDate[d.date] = d;
+  const dates = [], labels = [], vals = [];
+  for (let i = WINDOW - 1; i >= 0; i--) {
+    const dt = new Date(today); dt.setDate(dt.getDate() - i);
+    const key = dt.toLocaleDateString("en-CA");
+    dates.push(key); labels.push(key.slice(5));
+    const rec = byDate[key];
+    const v = rec && rec[field] != null ? rec[field] : null;
+    vals.push(v == null && kind === "bar" && zeroFill ? 0 : v);
+  }
+  return { dates, labels, vals };
+}
+
+function drawChart(canvas, o) {
+  const zeroFill = o.zeroFill !== false;
+  const { dates, labels, vals } = windowSeries(o.days, o.field, o.kind, zeroFill);
+  const partialDate = o.partial ? o.partial.date : todayLocal();
+
+  const accent = cssVar("--" + o.accent);
+  const soft = cssVar("--" + o.accent + "-soft");
+  const grid = cssVar("--line");
+  const tick = cssVar("--text-faint");
+  const mono = '"IBM Plex Mono", monospace';
+
+  if (charts[o.key]) charts[o.key].destroy();
+
+  const common = {
+    labels,
+    datasets: [{
+      data: vals,
+      borderColor: accent,
+      backgroundColor: o.kind === "bar"
+        ? dates.map(dt => dt === partialDate ? soft : accent)
+        : soft,
+      borderWidth: o.kind === "line" ? 2 : 0,
+      borderRadius: o.kind === "bar" ? 3 : 0,
+      pointRadius: o.kind === "line" ? dates.map(dt => dt === partialDate ? 0 : 2.5) : 0,
+      pointBackgroundColor: accent,
+      fill: o.kind === "line",
+      tension: 0.32,
+      spanGaps: true,
+    }],
+  };
+
+  charts[o.key] = new Chart(canvas.getContext("2d"), {
+    type: o.kind,
+    data: common,
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 500 },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#0f1216", borderColor: grid, borderWidth: 1,
+          titleFont: { family: mono, size: 11 }, bodyFont: { family: mono, size: 12 },
+          padding: 10, displayColors: false,
+          callbacks: { label: (i) => fmt(i.raw) + " " + o.unit },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { display: false },
+             ticks: { color: tick, font: { family: mono, size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 6 } },
+        y: { grid: { color: grid, drawTicks: false }, border: { display: false },
+             ticks: { color: tick, font: { family: mono, size: 10 }, maxTicksLimit: 4,
+                      callback: (v) => v >= 1000 ? (v / 1000) + "k" : v } },
+      },
+    },
+  });
+}
+
+// ─── Nutrition (pushed from the tracker) ───
+async function loadNutrition(c) {
+  const box = $("nutrition");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/nutrition", { headers: { Authorization: "Bearer " + c.token } });
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    DATA.nutrition = clean;
+    renderNutrition(clean);
+    renderDeficit();
+    renderScorecard();
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderNutrition(all) {
+  const box = $("nutrition");
+  box.innerHTML = "";
+  if (!all.length) return;
+
+  const last = all[all.length - 1];
+  const isPartial = last.date === todayLocal();
+  const complete = isPartial ? all.slice(0, -1) : all;
+  const partial = isPartial ? last : null;
+
+  const proteinStat = weekAvgDelta(complete, "protein");
+  const calAvg = mean(complete.map(d => d.calories).filter(v => v != null).slice(-7));
+  const calToday = (partial && partial.calories != null) ? partial.calories
+                 : (complete.length ? complete[complete.length - 1].calories : null);
+
+  let sub = "";
+  if (calToday != null) sub = 'Calories <b class="mono">' + fmt(calToday) + "</b>" + (partial ? " so far today" : "");
+  if (calAvg != null) sub += (sub ? " · " : "") + '7-day avg <b class="mono">' + fmt(calAvg) + "</b>";
+
+  box.appendChild(metricPanel({
+    key: "protein", title: "Fuel — protein", accent: "effort", field: "protein",
+    days: all, complete, partial, stat: proteinStat, unit: "g", goodIsUp: true, kind: "bar",
+    subNote: sub,
+  }));
+}
+
+// ─── Body metrics (weight / BF / waist) ───
+async function loadWeight(c) {
+  const box = $("weight");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/weight", { headers: { Authorization: "Bearer " + c.token } });
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    DATA.weight = clean;
+    renderWeight(clean);
+    renderScorecard();
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderWeight(all) {
+  const box = $("weight");
+  box.innerHTML = "";
+  const wdays = all.filter(d => d.weight != null);
+  if (!wdays.length) return;
+  const stat = weekAvgDelta(wdays, "weight");
+  const latest = wdays[wdays.length - 1];
+  const bits = [];
+  if (latest.bodyFat != null) bits.push('BF <b class="mono">' + latest.bodyFat + "%</b>");
+  if (latest.waist != null) bits.push('Waist <b class="mono">' + latest.waist + " in</b>");
+  box.appendChild(metricPanel({
+    key: "weight", title: "Body — weight", accent: "body", field: "weight",
+    days: wdays, complete: wdays, partial: null, stat, unit: "lb", goodIsUp: false, kind: "line",
+    subNote: bits.join(" · "),
+  }));
+}
+
+// ─── Copy for Claude ───
+function fnum(v, dp) { return v == null ? "—" : (dp ? (+v).toFixed(dp) : Math.round(v)); }
+function fk(v) { return v == null ? "—" : Math.round(v).toLocaleString(); }
+function forDate(arr, date, f) { const d = arr.find(x => x.date === date); return d && d[f] != null ? d[f] : null; }
+function latestObj(arr, f) { for (let i = arr.length - 1; i >= 0; i--) if (arr[i][f] != null) return arr[i]; return null; }
+function latestVal(arr, f) { const d = latestObj(arr, f); return d ? d[f] : null; }
+function avgN(arr, f, n, excludeDate) {
+  const vals = arr.filter(d => d[f] != null && d.date !== excludeDate).map(d => d[f]).slice(-n);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+function buildSummary() {
+  const t = todayLocal();
+  const { health: H, nutrition: N, oura: O, weight: W } = DATA;
+  const L = [];
+  L.push("COACHING SNAPSHOT — " + t);
+  L.push("");
+
+  L.push("TODAY (partial)");
+  L.push("Steps " + fk(forDate(H, t, "steps")) + " · Active " + fnum(forDate(H, t, "activeEnergy")) + " kcal");
+  const nToday = N.find(d => d.date === t);
+  if (nToday) L.push("Nutrition so far: " + fk(nToday.calories) + " kcal · " + fnum(nToday.protein) + "P " + fnum(nToday.carbs) + "C " + fnum(nToday.fat) + "F");
+  else L.push("Nutrition so far: none logged yet");
+  L.push("");
+
+  const wl = latestObj(W, "weight");
+  L.push("BODY" + (wl ? " (" + wl.date + ")" : ""));
+  if (wl) {
+    let line = "Weight " + fnum(wl.weight, 1) + " lb";
+    if (wl.bodyFat != null) line += " · BF " + fnum(wl.bodyFat, 1) + "%";
+    if (wl.waist != null) line += " · Waist " + fnum(wl.waist, 1) + " in";
+    L.push(line);
+    const wv = W.filter(d => d.weight != null).map(d => d.weight);
+    if (wv.length >= 2) {
+      const first = wv[Math.max(0, wv.length - 7)], last = wv[wv.length - 1], dc = last - first;
+      L.push("7-day weight: " + fnum(first, 1) + " → " + fnum(last, 1) + " (" + (dc >= 0 ? "+" : "") + dc.toFixed(1) + " lb)");
+    }
+  } else L.push("No weight logged yet — add a morning check-in in the tracker.");
+  L.push("");
+
+  L.push("RECOVERY (last night)");
+  const ol = latestObj(O, "sleepScore") || {};
+  if (ol.preliminary) {
+    // No trustworthy HRV yet — genuinely pending.
+    L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
+           " · HRV pending · Resting HR pending");
+    L.push("⚠ Oura sync still finalizing last night — HRV not yet available. Re-pull midday for the real number.");
+  } else if (ol.hrvProvisional) {
+    // A plausible HRV finalized before staging synced. Show it, but flag it as
+    // provisional so it's confirmed (against the Oura app / a re-pull), not trusted blind.
+    L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
+           " · HRV " + fnum(ol.hrv) + " ms (provisional) · Resting HR " + fnum(latestVal(H, "restingHeartRate")));
+    L.push("⚠ HRV " + fnum(ol.hrv) + " is provisional — staging hadn't fully synced. Confirm it matches the Oura app / holds on a re-pull before trusting it, especially if it's a big jump from recent days.");
+    if (ol.tempDev != null) L.push("Body temp deviation: " + (ol.tempDev >= 0 ? "+" : "") + ol.tempDev.toFixed(1) + "°C");
+  } else {
+    let recLine = "Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
+           " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate"));
+    L.push(recLine);
+    if (ol.stagesPending) {
+      L.push("(Sleep stages still finalizing — HRV above is confirmed, stage breakdown will fill in on a later pull.)");
+    } else {
+      const stageBits = [];
+      if (ol.deepSleep != null) stageBits.push("Deep " + ol.deepSleep.toFixed(1) + "h");
+      if (ol.remSleep != null) stageBits.push("REM " + ol.remSleep.toFixed(1) + "h");
+      if (ol.lightSleep != null) stageBits.push("Light " + ol.lightSleep.toFixed(1) + "h");
+      if (stageBits.length) L.push("Sleep stages: " + stageBits.join(" · "));
+    }
+    const tempD = latestVal(O, "tempDev");
+    if (tempD != null) L.push("Body temp deviation: " + (tempD >= 0 ? "+" : "") + tempD.toFixed(1) + "°C" + (Math.abs(tempD) >= 0.5 ? "  (elevated — possible illness/strain)" : ""));
+  }
+  L.push("");
+
+  // recent workouts
+  const woRecent = (DATA.workouts || []).slice(-3).reverse();
+  if (woRecent.length) {
+    L.push("RECENT WORKOUTS");
+    for (const day of woRecent) for (const w of (day.workouts || [])) {
+      L.push(day.date + ": " + w.type + (w.minutes != null ? " · " + w.minutes + " min" : "") + (w.energy != null ? " · " + Math.round(w.energy) + " kcal" : ""));
+    }
+    L.push("");
+  }
+
+  L.push("7-DAY AVERAGES (today excluded)");
+  const actAvg = avgN(H, "activeEnergy", 7, t), restAvg = avgN(H, "restingEnergy", 7, t);
+  const cal = calibrateMaintenance(N, DATA.weight || []);
+  const maintLabel = cal.ok ? (fk(cal.lo) + "–" + fk(cal.hi) + " (calibrated)") : "~2,450 (anchor)";
+  L.push("Steps " + fk(avgN(H, "steps", 7, t)) + "/day · Active " + fnum(actAvg) + " kcal/day");
+  L.push("Calibrated maintenance " + maintLabel + " · derived from scale, not watch");
+  const calAvg = avgN(N, "calories", 7, t);
+  const maintNum = cal.ok ? cal.maintenance : 2450;
+  const avgDelta = calAvg != null ? Math.round(calAvg - maintNum) : null;
+  L.push("Nutrition " + fk(calAvg) + " kcal · " + fnum(avgN(N, "protein", 7, t)) + "P /day" +
+         (avgDelta != null ? " · avg daily balance " + (avgDelta >= 0 ? "+" : "") + fk(avgDelta) + " kcal" : ""));
+  L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
+         " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(H, "restingHeartRate", 7)));
+
+  // TIMING (today) — protein distribution + peri-workout + workout times
+  const timing = [];
+  const nT = N.find(d => d.date === t);
+  if (nT && Array.isArray(nT.meals) && nT.meals.length) {
+    const meals = nT.meals.slice().sort((a, b) => (a.t < b.t ? -1 : 1));
+    const buckets = { am: 0, mid: 0, eve: 0 };
+    for (const m of meals) {
+      const hr = parseInt((m.t || "12:00").slice(0, 2), 10);
+      if (hr < 11) buckets.am += m.p || 0;
+      else if (hr < 16) buckets.mid += m.p || 0;
+      else buckets.eve += m.p || 0;
+    }
+    // one line per item with full macros — carbs first (the glucose driver)
+    for (const m of meals) {
+      const label = m.meal ? m.meal.slice(0, 3) : "";
+      const wk = m.wk ? " [" + m.wk + "]" : "";
+      const name = m.name ? " " + m.name : "";
+      const macro = [
+        m.c != null ? m.c + "C" : null,
+        m.cal != null ? m.cal + "cal" : null,
+        m.p != null ? m.p + "P" : null,
+        m.f != null ? m.f + "F" : null,
+      ].filter(Boolean).join(" ");
+      timing.push(m.t + " " + label + wk + name + (macro ? " · " + macro : ""));
+    }
+    const total = buckets.am + buckets.mid + buckets.eve;
+    let shape = "even";
+    if (total > 0) {
+      if (buckets.eve / total > 0.5) shape = "backloaded";
+      else if (buckets.am / total > 0.45) shape = "frontloaded";
+    }
+    timing.push("Protein spread: AM " + buckets.am + " / mid " + buckets.mid + " / eve " + buckets.eve + " \u2192 " + shape);
+  }
+  const wT = (DATA.workouts || []).find(d => d.date === t);
+  if (wT && Array.isArray(wT.workouts) && wT.workouts.length) {
+    const ws = wT.workouts.map(w => {
+      const start = (w.start || "").replace("T", " ").slice(11, 16);
+      return (w.type || "Workout") + (start ? " " + start : "") + (w.minutes ? " (" + w.minutes + "m)" : "");
+    }).join(" · ");
+    timing.push("Workouts: " + ws);
+  }
+  if (timing.length) {
+    L.push("");
+    L.push("TIMING (today)");
+    for (const line of timing) L.push(line);
+  }
+
+  L.push("");
+  L.push("(From the Recomp dashboard — moderate cut toward 15%. Give me my daily brief: yesterday's verdict, today's setup, one adjustment.)");
+  return L.join("\n");
+}
+
+async function onCopy() {
+  const btn = $("copyBtn");
+  const text = buildSummary();
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = "Copied ✓ — paste into Claude";
+    btn.classList.add("done");
+    setTimeout(() => { btn.textContent = "⧉ Copy for Claude"; btn.classList.remove("done"); }, 2600);
+  } catch (e) {
+    const ov = document.createElement("div");
+    ov.className = "overlay";
+    ov.innerHTML = '<div class="setup"><h2>Copy this</h2><p>Select all, copy, and paste into Claude.</p>' +
+      '<textarea readonly style="width:100%;min-height:240px;background:var(--ink);border:1px solid var(--line-strong);border-radius:10px;color:var(--text);padding:11px;font-family:monospace;font-size:12px"></textarea>' +
+      '<button id="fbClose">Done</button></div>';
+    ov.querySelector("textarea").value = text;
+    document.body.appendChild(ov);
+    const ta = ov.querySelector("textarea"); ta.focus(); ta.select();
+    ov.querySelector("#fbClose").onclick = () => ov.remove();
+  }
+}
+
+// keyboard: Esc closes setup
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSetup(); });
+
+// ─── Oura (sleep / readiness / HRV) ───
+async function loadOura(c) {
+  const box = $("oura");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/oura", { headers: { Authorization: "Bearer " + c.token } });
+    if (res.status === 409) { box.innerHTML = ouraConnectCard(c.base); return; }
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    DATA.oura = clean;
+    renderOura(clean);
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function ouraConnectCard(base) {
+  return '<div class="oura-connect"><div class="s-title">Sleep &amp; recovery — Oura</div>' +
+         '<div class="s-body">Not connected yet. Connect once and your sleep score, readiness, and HRV appear here.</div>' +
+         '<a href="' + base + '/oura/login" target="_blank" rel="noopener">Connect Oura</a></div>';
+}
+
+function renderOura(oura) {
+  const box = $("oura");
+  box.innerHTML = "";
+  if (!oura.length) return;
+
+  const sleepStat = weekAvgDelta(oura, "sleepScore");
+  const readyStat = weekAvgDelta(oura, "readinessScore");
+  const hrvAvg = mean(oura.map(d => d.hrv).filter(v => v != null).slice(-7));
+  const hoursAvg = mean(oura.map(d => d.sleepHours).filter(v => v != null).slice(-7));
+  const latest = oura[oura.length - 1] || {};
+
+  // sleep stages on the latest night
+  let sleepSub = hoursAvg != null ? 'Avg sleep <b class="mono">' + hoursAvg.toFixed(1) + " h</b>" : "";
+  if (latest.deepSleep != null || latest.remSleep != null) {
+    const bits = [];
+    if (latest.deepSleep != null) bits.push('Deep <b class="mono">' + latest.deepSleep.toFixed(1) + "h</b>");
+    if (latest.remSleep != null) bits.push('REM <b class="mono">' + latest.remSleep.toFixed(1) + "h</b>");
+    sleepSub += (sleepSub ? " · " : "") + "last night " + bits.join(" · ");
+  }
+
+  // temperature deviation is a quiet illness/overtraining flag
+  let readySub = hrvAvg != null ? 'Avg HRV <b class="mono">' + Math.round(hrvAvg) + " ms</b>" : "HRV — filling in as nights sync";
+  if (latest.tempDev != null) {
+    const t = latest.tempDev;
+    readySub += ' · Temp <b class="mono">' + (t >= 0 ? "+" : "") + t.toFixed(1) + "°</b>" + (Math.abs(t) >= 0.5 ? " ⚠" : "");
+  }
+
+  box.appendChild(metricPanel({
+    key: "sleep", title: "Recovery — sleep score", accent: "recovery", field: "sleepScore",
+    days: oura, complete: oura, partial: null, stat: sleepStat, unit: "", goodIsUp: true, kind: "line",
+    subNote: sleepSub,
+  }));
+  box.appendChild(metricPanel({
+    key: "readiness", title: "Recovery — readiness", accent: "recovery", field: "readinessScore",
+    days: oura, complete: oura, partial: null, stat: readyStat, unit: "", goodIsUp: true, kind: "line",
+    subNote: readySub,
+  }));
+}
+
+// ─── Scorecard: the proactive measurables (7-day avg intake, avg deficit, on-target count) ───
+function renderScorecard() {
+  const box = $("scorecard");
+  if (!box) return;
+  const N = DATA.nutrition || [], W = DATA.weight || [];
+  if (!N.length) { box.innerHTML = ""; return; }
+  const t = todayLocal();
+
+  // 7-day average intake (exclude today's partial log)
+  const avgIntake = avgN(N, "calories", 7, t);
+  const avgProt = avgN(N, "protein", 7, t);
+  if (avgIntake == null) { box.innerHTML = ""; return; }
+
+  // Calibrated maintenance (falls back to 2450 anchor if window not clean yet)
+  const cal = calibrateMaintenance(N, W);
+  const maint = cal.ok ? cal.maintenance : 2450;
+  const avgDeficit = Math.round(avgIntake - maint); // negative = deficit
+
+  // Days-on-target: of the last 7 logged days (excl today), how many ≤ 2100 kcal
+  const recent = N.filter(d => d.calories != null && d.date !== t).slice(-7);
+  const onTarget = recent.filter(d => d.calories <= 2100).length;
+  const proteinDays = recent.filter(d => d.protein != null && d.protein >= 180).length;
+
+  // Targets
+  const INTAKE_TARGET = 2100;
+  const DEF_LO = -375, DEF_HI = -250; // the band that yields ~0.5–0.75 lb/wk
+
+  // ── Outcome metric: smoothed 14-day weight trend (lb/week) ──
+  // The inputs above are what you DO; this is whether it's WORKING. Smooth both
+  // endpoints with a 3-day average so a single water day can't fake the trend.
+  let trendTxt = "—", trendColor = "var(--text-faint)", trendNote = "need ~14 days of weigh-ins";
+  const wd = W.filter(d => d.weight != null).sort((a, b) => a.date < b.date ? -1 : 1);
+  if (wd.length >= 2) {
+    const last = wd[wd.length - 1];
+    const spanFirst = new Date(new Date(last.date) - 14 * 86400000);
+    const win = wd.filter(d => new Date(d.date) >= spanFirst);
+    if (win.length >= 2) {
+      const days = Math.round((new Date(win[win.length - 1].date) - new Date(win[0].date)) / 86400000);
+      if (days >= 10) { // enough span for water to average out
+        const near = (dateStr) => {
+          const tgt = new Date(dateStr);
+          const p = win.filter(d => Math.abs(new Date(d.date) - tgt) <= 2 * 86400000).map(d => d.weight);
+          return p.reduce((a, b) => a + b, 0) / p.length;
+        };
+        const startV = near(win[0].date), endV = near(win[win.length - 1].date);
+        const perWeek = ((endV - startV) / days) * 7;
+        const losing = perWeek < 0;
+        const inBand = perWeek <= -0.4 && perWeek >= -0.9; // roughly the 0.5–0.75 goal w/ tolerance
+        trendTxt = (perWeek >= 0 ? "+" : "") + perWeek.toFixed(2) + " lb/wk";
+        trendColor = inBand ? "var(--recovery)" : (losing ? "var(--body)" : "var(--text-dim)");
+        trendNote = inBand ? "in the target loss range" :
+          (losing ? "losing, but outside the 0.5–0.75 target pace" :
+           "not losing over 14 days — check the inputs above");
+      } else {
+        trendNote = "need a longer clean stretch (" + days + "d so far)";
+      }
+    }
+  }
+
+  // Status coloring helpers
+  const intakeOk = avgIntake <= INTAKE_TARGET + 30;
+  const defOk = avgDeficit <= DEF_HI;            // at least -250
+  const defStrong = avgDeficit <= DEF_LO;        // deeper than -375 (watch it's not too aggressive)
+  const color = (ok) => ok ? "var(--recovery)" : "var(--text-dim)";
+
+  const maintNote = cal.ok
+    ? ("vs calibrated maintenance " + fk(cal.lo) + "–" + fk(cal.hi))
+    : ("vs ~2,450 anchor — " + (cal.reason || "calibrating") + "");
+
+  box.innerHTML =
+    '<div class="panel">' +
+      '<div class="panel-head"><div class="panel-title"><span class="dot effort"></span>SCORECARD — 7-day rolling</div></div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+        // Avg intake tile
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">AVG INTAKE / DAY</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(intakeOk) + '">' + fk(avgIntake) + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">target ≤ ' + fk(INTAKE_TARGET) + '</div>' +
+        '</div>' +
+        // Avg deficit tile
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">AVG DEFICIT / DAY</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(defOk) + '">' + (avgDeficit >= 0 ? "+" : "") + fk(avgDeficit) + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">target −250 to −375</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">' +
+        // Days on target
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">DAYS ≤ 2,100 (of ' + recent.length + ')</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(onTarget >= 6) + '">' + onTarget + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">aim 6 of 7</div>' +
+        '</div>' +
+        // Protein days
+        '<div style="flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px">' +
+          '<div style="font-size:11px;color:var(--text-faint);letter-spacing:.03em;margin-bottom:4px">PROTEIN ≥180 (of ' + recent.length + ')</div>' +
+          '<div class="mono" style="font-size:26px;color:' + color(proteinDays >= 6) + '">' + proteinDays + '</div>' +
+          '<div style="font-size:11px;color:var(--text-faint);margin-top:2px">avg ' + fnum(avgProt) + 'g/day</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:baseline;justify-content:space-between;padding:12px 2px 10px;margin-bottom:10px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">' +
+        '<div><span style="font-size:11px;color:var(--text-faint);letter-spacing:.03em">14-DAY WEIGHT TREND</span>' +
+        '<span style="font-size:11px;color:var(--text-faint);margin-left:8px">← the outcome these inputs should produce</span></div>' +
+        '<div class="mono" style="font-size:20px;color:' + trendColor + '">' + trendTxt + '</div>' +
+      '</div>' +
+      '<div style="font-size:12px;color:var(--text-faint);line-height:1.5">' +
+        maintNote + '. Deficit sharpens as the calibration window gets cleaner. Trend: ' + trendNote + '. ' +
+        (defStrong ? '⚠ Running deeper than −375 — verify it\'s real loss, not water, before trusting it.' :
+         (defOk ? 'On track for ~0.5–0.75 lb/week if the trend confirms.' :
+          'Deficit shallow — tighten the weekly average to widen it.')) +
+      '</div>' +
+    '</div>';
+}
+
+// ─── Energy balance (self-calibrating maintenance from the scale) ───
+// The watch's active+resting "TDEE" is inflated (~3,200) vs Mark's true
+// maintenance (~2,450, established from weight response). So instead of
+// trusting the watch, we BACK-SOLVE maintenance from ground truth:
+//   maintenance ≈ avg daily intake − (weight change in lb × 3500 ÷ days)
+// Over a long-enough window, water noise cancels and the weight-change term
+// approximates real tissue change, so this converges on true maintenance and
+// automatically tracks downward as bodyweight drops. Guardrails below stop a
+// short/watery window from poisoning the estimate.
+function calibrateMaintenance(N, W) {
+  const nByDate = {}; for (const d of N) if (d.calories != null) nByDate[d.date] = d.calories;
+  const wdays = W.filter(d => d.weight != null).sort((a, b) => a.date < b.date ? -1 : 1);
+  const today = todayLocal();
+
+  // Use the longest clean window we have, capped at 21 days, floored at 14.
+  // Under 14 days water noise dominates and the estimate is untrustworthy.
+  const MIN_DAYS = 14, MAX_DAYS = 21;
+  if (wdays.length < 2) return { ok: false, reason: "Need more weigh-ins" };
+
+  const first = wdays[0], last = wdays[wdays.length - 1];
+  const spanDays = Math.round((new Date(last.date) - new Date(first.date)) / 86400000);
+  if (spanDays < MIN_DAYS) return { ok: false, reason: "Keep logging — " + (MIN_DAYS - spanDays) + " more days for a reliable maintenance estimate" };
+
+  // Window: last MAX_DAYS of weight data
+  const cutoff = new Date(new Date(last.date) - MAX_DAYS * 86400000);
+  const wWin = wdays.filter(d => new Date(d.date) >= cutoff);
+  const wStart = wWin[0], wEnd = wWin[wWin.length - 1];
+  const winDays = Math.round((new Date(wEnd.date) - new Date(wStart.date)) / 86400000);
+  if (winDays < MIN_DAYS) return { ok: false, reason: "Keep logging for a reliable estimate" };
+
+  // Smooth endpoints with a 3-day average to blunt single-day water spikes.
+  const near = (arr, dateStr, f) => {
+    const target = new Date(dateStr);
+    const picks = arr.filter(d => Math.abs(new Date(d.date) - target) <= 2 * 86400000 && d[f] != null).map(d => d[f]);
+    return picks.length ? picks.reduce((a, b) => a + b, 0) / picks.length : null;
+  };
+  const wStartV = near(wWin, wStart.date, "weight");
+  const wEndV = near(wWin, wEnd.date, "weight");
+  const weightChange = wEndV - wStartV; // lb over the window (– = loss)
+
+  // Average intake over the SAME window (exclude today's partial log)
+  const intakes = [];
+  for (let i = 0; i <= winDays; i++) {
+    const ds = new Date(new Date(wStart.date).getTime() + i * 86400000).toLocaleDateString("en-CA");
+    if (ds === today) continue;
+    if (nByDate[ds] != null) intakes.push(nByDate[ds]);
+  }
+  if (intakes.length < MIN_DAYS - 2) return { ok: false, reason: "Not enough logged-food days in the window yet" };
+  const avgIntake = intakes.reduce((a, b) => a + b, 0) / intakes.length;
+
+  // Back-solve: maintenance = avg intake − (daily weight-change energy)
+  const dailyDeltaLb = weightChange / winDays;
+  const maintenance = avgIntake - dailyDeltaLb * 3500;
+
+  // Sanity clamp — reject physiologically implausible outputs (a watery window)
+  if (maintenance < 1800 || maintenance > 3200) {
+    return { ok: false, reason: "Recent water swings are distorting the estimate — needs a cleaner stretch", raw: Math.round(maintenance) };
+  }
+
+  // Report as a range (±120) to avoid false precision
+  return {
+    ok: true, maintenance: Math.round(maintenance),
+    lo: Math.round(maintenance - 120), hi: Math.round(maintenance + 120),
+    avgIntake: Math.round(avgIntake), weightChange: +weightChange.toFixed(1),
+    windowDays: winDays, intakeDays: intakes.length,
+  };
+}
+
+function renderDeficit() {
+  const box = $("deficit");
+  if (!box) return;
+  box.innerHTML = "";
+  const H = DATA.health, N = DATA.nutrition, W = DATA.weight || [];
+  if (!N.length) return;
+
+  const cal = calibrateMaintenance(N, W);
+  const nByDate = {}; for (const d of N) nByDate[d.date] = d;
+  const today = todayLocal();
+
+  // Maintenance to reckon against: calibrated if available, else our known ~2,450 anchor.
+  const maint = cal.ok ? cal.maintenance : 2450;
+
+  // Per-day delta = intake − calibrated maintenance (NOT watch TDEE).
+  const rows = [];
+  for (const date of Object.keys(nByDate)) {
+    if (date === today) continue;
+    const n = nByDate[date];
+    if (!n || n.calories == null) continue;
+    rows.push({ date, deficit: Math.round(n.calories - maint), intake: n.calories });
+  }
+  rows.sort((a, b) => a.date < b.date ? -1 : 1);
+  if (!rows.length) return;
+
+  const stat = weekAvgDelta(rows, "deficit");
+  const latest = rows[rows.length - 1];
+
+  // Header line: the calibrated maintenance and how it was derived.
+  let calLine;
+  if (cal.ok) {
+    calLine = 'Calibrated maintenance <b class="mono">' + fk(cal.lo) + "–" + fk(cal.hi) +
+      '</b> kcal (from your last ' + cal.windowDays + "d: avg intake " + fk(cal.avgIntake) +
+      ", weight " + (cal.weightChange >= 0 ? "+" : "") + cal.weightChange + " lb)";
+  } else {
+    calLine = 'Maintenance <b class="mono">~2,450</b> kcal (anchor — ' + cal.reason + ")";
+  }
+  const sub = calLine + "<br>Latest day: in <b class=\"mono\">" + fk(latest.intake) +
+    "</b> vs maint <b class=\"mono\">" + fk(maint) + "</b> → <b class=\"mono\">" +
+    (latest.deficit >= 0 ? "+" : "") + fk(latest.deficit) + "</b> kcal · 7-day avg delta <b class=\"mono\">" +
+    (stat && stat.avg != null ? (stat.avg >= 0 ? "+" : "") + fk(stat.avg) : "—") + "</b>";
+
+  box.appendChild(metricPanel({
+    key: "deficit", title: "Energy balance — intake vs calibrated maintenance", accent: "effort", field: "deficit",
+    days: rows, complete: rows, partial: null, stat, unit: "kcal", goodIsUp: false, kind: "bar",
+    subNote: sub + ' · negative = real deficit · derived from the scale, not the watch', zeroFill: false,
+  }));
+}
+
+// ─── Workouts (type + duration from Apple Health) ───
+async function loadWorkouts(c) {
+  const box = $("workouts");
+  if (!box) return;
+  try {
+    const res = await fetch(c.base + "/workouts", { headers: { Authorization: "Bearer " + c.token } });
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const { days } = await res.json();
+    DATA.workouts = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
+    renderWorkouts(DATA.workouts);
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderWorkouts(days) {
+  const box = $("workouts");
+  box.innerHTML = "";
+  const recent = days.slice(-6).reverse();
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  let rows = "";
+  if (!recent.length) {
+    rows = '<div class="wo-empty">No workouts yet. Add a Health Auto Export automation with Data Type = Workouts pointing at your Worker.</div>';
+  } else {
+    for (const day of recent) {
+      for (const w of (day.workouts || [])) {
+        const dur = w.minutes != null ? w.minutes + " min" : "";
+        const en = w.energy != null ? Math.round(w.energy) + " kcal" : "";
+        rows += '<div class="wo-row"><span class="wo-date mono">' + day.date.slice(5) + '</span>' +
+          '<span class="wo-type">' + w.type + '</span>' +
+          '<span class="wo-meta mono">' + [dur, en].filter(Boolean).join(" · ") + '</span></div>';
+      }
+    }
+  }
+  panel.innerHTML = '<div class="panel-head"><div class="panel-title"><span class="dot effort"></span>Training — recent sessions</div></div>' + rows;
+  box.appendChild(panel);
+}
+
+run();
+</script>
+</body>
+</html>
