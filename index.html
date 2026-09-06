@@ -551,21 +551,30 @@ function buildSummary() {
   L.push("RECOVERY (last night)");
   const ol = latestObj(O, "sleepScore") || {};
   if (ol.preliminary) {
-    // Oura hasn't finalized last night yet — the guard blanked HRV/stages.
-    // Show scores (which are usually present) but flag the rest as pending so
-    // the brief doesn't treat a partial sync as real data.
+    // No trustworthy HRV yet — genuinely pending.
     L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
            " · HRV pending · Resting HR pending");
-    L.push("⚠ Oura sync still finalizing last night — HRV/stages not yet reliable. Re-pull midday for the real numbers.");
+    L.push("⚠ Oura sync still finalizing last night — HRV not yet available. Re-pull midday for the real number.");
+  } else if (ol.hrvProvisional) {
+    // A plausible HRV finalized before staging synced. Show it, but flag it as
+    // provisional so it's confirmed (against the Oura app / a re-pull), not trusted blind.
+    L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
+           " · HRV " + fnum(ol.hrv) + " ms (provisional) · Resting HR " + fnum(latestVal(H, "restingHeartRate")));
+    L.push("⚠ HRV " + fnum(ol.hrv) + " is provisional — staging hadn't fully synced. Confirm it matches the Oura app / holds on a re-pull before trusting it, especially if it's a big jump from recent days.");
+    if (ol.tempDev != null) L.push("Body temp deviation: " + (ol.tempDev >= 0 ? "+" : "") + ol.tempDev.toFixed(1) + "°C");
   } else {
     let recLine = "Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
            " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate"));
     L.push(recLine);
-    const stageBits = [];
-    if (ol.deepSleep != null) stageBits.push("Deep " + ol.deepSleep.toFixed(1) + "h");
-    if (ol.remSleep != null) stageBits.push("REM " + ol.remSleep.toFixed(1) + "h");
-    if (ol.lightSleep != null) stageBits.push("Light " + ol.lightSleep.toFixed(1) + "h");
-    if (stageBits.length) L.push("Sleep stages: " + stageBits.join(" · "));
+    if (ol.stagesPending) {
+      L.push("(Sleep stages still finalizing — HRV above is confirmed, stage breakdown will fill in on a later pull.)");
+    } else {
+      const stageBits = [];
+      if (ol.deepSleep != null) stageBits.push("Deep " + ol.deepSleep.toFixed(1) + "h");
+      if (ol.remSleep != null) stageBits.push("REM " + ol.remSleep.toFixed(1) + "h");
+      if (ol.lightSleep != null) stageBits.push("Light " + ol.lightSleep.toFixed(1) + "h");
+      if (stageBits.length) L.push("Sleep stages: " + stageBits.join(" · "));
+    }
     const tempD = latestVal(O, "tempDev");
     if (tempD != null) L.push("Body temp deviation: " + (tempD >= 0 ? "+" : "") + tempD.toFixed(1) + "°C" + (Math.abs(tempD) >= 0.5 ? "  (elevated — possible illness/strain)" : ""));
   }
