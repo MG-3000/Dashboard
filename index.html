@@ -922,6 +922,35 @@ function calibrateMaintenance(N, W) {
   };
 }
 
+// ─── Today's reference balance (directional only — NOT part of calibration) ───
+// The main panel below answers "is the WEEKLY AVERAGE a real deficit" — every day
+// is compared against the same calibrated maintenance number, on purpose, because
+// that's the lever Mark actually controls and single-day noise shouldn't move it.
+// But that means a day with a big stacked workout (boxing + run = 1,200+ kcal)
+// looks identical to a quiet day if intake matches — which is confusing to read
+// same-day. This function answers THAT question instead: net today's watch-
+// estimated workout kcal against maintenance, just for today, just for display.
+// It never feeds calibrateMaintenance(), the scorecard, or the 14-day trend —
+// watch active-energy carries the same inflation bias as watch TDEE, so this
+// number is a same-day sanity check, not a substitute for the calibrated trend.
+function todaysReferenceBalance(N, workoutsData, maint) {
+  const today = todayLocal();
+  const nByDate = {}; for (const d of N) nByDate[d.date] = d;
+  const todayN = nByDate[today];
+  if (!todayN || todayN.calories == null) return null;
+
+  const todayWO = (workoutsData || []).find(d => d.date === today);
+  const workoutKcal = todayWO
+    ? (todayWO.workouts || []).reduce((sum, w) => sum + (w.energy || 0), 0)
+    : 0;
+
+  // maintenance already reflects a TYPICAL day's training mix, so a day with
+  // meaningfully more conditioning than typical burns meaningfully more than
+  // maintenance alone — hence adding workout kcal on top rather than replacing it.
+  const balance = Math.round(todayN.calories - (maint + workoutKcal));
+  return { balance, intake: todayN.calories, workoutKcal: Math.round(workoutKcal), maint };
+}
+
 function renderDeficit() {
   const box = $("deficit");
   if (!box) return;
@@ -959,10 +988,20 @@ function renderDeficit() {
   } else {
     calLine = 'Maintenance <b class="mono">~2,450</b> kcal (anchor — ' + cal.reason + ")";
   }
-  const sub = calLine + "<br>Latest day: in <b class=\"mono\">" + fk(latest.intake) +
+  let sub = calLine + "<br>Latest day: in <b class=\"mono\">" + fk(latest.intake) +
     "</b> vs maint <b class=\"mono\">" + fk(maint) + "</b> → <b class=\"mono\">" +
     (latest.deficit >= 0 ? "+" : "") + fk(latest.deficit) + "</b> kcal · 7-day avg delta <b class=\"mono\">" +
     (stat && stat.avg != null ? (stat.avg >= 0 ? "+" : "") + fk(stat.avg) : "—") + "</b>";
+
+  // Today's directional reference — see todaysReferenceBalance() note above.
+  const ref = todaysReferenceBalance(N, DATA.workouts, maint);
+  if (ref) {
+    sub += "<br>Today (directional, partial): in <b class=\"mono\">" + fk(ref.intake) +
+      "</b> vs maint+workout <b class=\"mono\">" + fk(ref.maint + ref.workoutKcal) +
+      "</b> (workout <b class=\"mono\">" + fk(ref.workoutKcal) + "</b> kcal, watch est.) → <b class=\"mono\">" +
+      (ref.balance >= 0 ? "+" : "") + fk(ref.balance) +
+      "</b> kcal · not part of the calibrated trend or scorecard";
+  }
 
   box.appendChild(metricPanel({
     key: "deficit", title: "Energy balance — intake vs calibrated maintenance", accent: "effort", field: "deficit",
