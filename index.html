@@ -551,21 +551,48 @@ function buildSummary() {
   L.push("RECOVERY (last night)");
   const ol = latestObj(O, "sleepScore") || {};
   if (ol.preliminary) {
-    // No trustworthy HRV yet — genuinely pending.
+    // No trustworthy HRV for last night yet. Two very different situations
+    // hide behind that, and conflating them caused a week of false alarms:
+    //   - you woke 20 minutes ago and Oura is simply still working (normal)
+    //   - it's been hours and the sync is genuinely stuck (actionable)
+    // minutesSinceWake comes from the Worker (bedtime_end), so we can tell.
+    const mins = ol.minutesSinceWake;
     L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
-           " · HRV pending · Resting HR pending");
-    L.push("⚠ Oura sync still finalizing last night — HRV not yet available. Re-pull midday for the real number.");
+           " · HRV processing · Resting HR processing");
+    if (mins != null && mins < 90) {
+      const woke = ol.sleepEnd ? new Date(ol.sleepEnd).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
+      L.push("Sleep ended" + (woke ? " " + woke : "") + " (" + mins + " min ago) — Oura still processing. This is normal (~1hr after wake), not a sync failure.");
+    } else if (mins != null) {
+      L.push("⚠ Still no HRV " + Math.round(mins / 60) + "h after wake — that's longer than normal. Hit /oura/sync or check the Oura app directly.");
+    } else {
+      L.push("⚠ Oura sync still finalizing last night. Hit /oura/sync or check the Oura app.");
+    }
+    // Never leave the brief without a real number: fall back to the most
+    // recent CONFIRMED night so there's always a dated anchor to reason from.
+    const lastGood = [...O].reverse().find(d => d.confirmed && d.hrv != null);
+    if (lastGood) {
+      L.push("Last confirmed night (" + lastGood.date + "): HRV " + fnum(lastGood.hrv) +
+             " ms · RHR " + fnum(lastGood.lowestHr) + " (Oura)");
+    }
   } else if (ol.hrvProvisional) {
     // A plausible HRV finalized before staging synced. Show it, but flag it as
     // provisional so it's confirmed (against the Oura app / a re-pull), not trusted blind.
     L.push("Sleep " + fnum(ol.sleepScore) + " · Readiness " + fnum(ol.readinessScore) +
-           " · HRV " + fnum(ol.hrv) + " ms (provisional) · Resting HR " + fnum(latestVal(H, "restingHeartRate")));
-    L.push("⚠ HRV " + fnum(ol.hrv) + " is provisional — staging hadn't fully synced. Confirm it matches the Oura app / holds on a re-pull before trusting it, especially if it's a big jump from recent days.");
+           " · HRV " + fnum(ol.hrv) + " ms (provisional) · RHR " + fnum(ol.lowestHr) + " (Oura)");
+    L.push("⚠ HRV " + fnum(ol.hrv) + " is provisional — staging hadn't fully synced. It'll promote to confirmed automatically once a later pull agrees; treat a big jump skeptically until it does.");
     if (ol.tempDev != null) L.push("Body temp deviation: " + (ol.tempDev >= 0 ? "+" : "") + ol.tempDev.toFixed(1) + "°C");
   } else {
-    let recLine = "Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
-           " · HRV " + fnum(latestVal(O, "hrv")) + " ms · Resting HR " + fnum(latestVal(H, "restingHeartRate"));
-    L.push(recLine);
+    // DEVICE SOURCING — do not mix these on one line.
+    // Oura's lowestHr is a sleeping RHR; Apple's restingHeartRate is a
+    // waking-day resting figure. They measure different things and Apple reads
+    // structurally higher. Pairing Oura HRV with Apple RHR once produced an
+    // apparent "54 → 65 overnight jump" that was really just two devices —
+    // and nearly cost a training day. Oura leads; Apple is a separate, tagged
+    // line so a trend can only ever be read within one device.
+    L.push("Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
+           " · HRV " + fnum(latestVal(O, "hrv")) + " ms · RHR " + fnum(ol.lowestHr) + " (Oura, sleeping)");
+    const appleRhr = latestVal(H, "restingHeartRate");
+    if (appleRhr != null) L.push("Apple RHR " + fnum(appleRhr) + " (waking — different measure, don't compare to Oura)");
     if (ol.stagesPending) {
       L.push("(Sleep stages still finalizing — HRV above is confirmed, stage breakdown will fill in on a later pull.)");
     } else {
@@ -601,8 +628,10 @@ function buildSummary() {
   const avgDelta = calAvg != null ? Math.round(calAvg - maintNum) : null;
   L.push("Nutrition " + fk(calAvg) + " kcal · " + fnum(avgN(N, "protein", 7, t)) + "P /day" +
          (avgDelta != null ? " · avg daily balance " + (avgDelta >= 0 ? "+" : "") + fk(avgDelta) + " kcal" : ""));
+  // Same device-sourcing rule as the nightly line: Oura RHR, so the 7-day
+  // average and last night's number are the same measure and comparable.
   L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
-         " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(H, "restingHeartRate", 7)));
+         " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(O, "lowestHr", 7)) + " (Oura)");
 
   // TIMING (today) — protein distribution + peri-workout + workout times
   const timing = [];
