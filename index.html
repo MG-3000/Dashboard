@@ -550,7 +550,33 @@ function buildSummary() {
 
   L.push("RECOVERY (last night)");
   const ol = latestObj(O, "sleepScore") || {};
-  if (ol.preliminary) {
+  // STALENESS GATE — this runs before anything else in the recovery block.
+  // A stuck sync once served the same 76/84/HRV-78/RHR-50 record for nine
+  // consecutive days, and every one of those days it was labelled "last
+  // night". Old numbers presented as current are worse than no numbers:
+  // they get used to clear training. So if the newest record isn't
+  // yesterday or today, say so loudly and DON'T dress it up as last night.
+  const st = DATA.ouraStatus || {};
+  const staleDays = st.staleDays;
+  const isStale = staleDays != null && staleDays >= 2;
+  if (isStale || st.needsReconnect) {
+    L.push("⚠ NO CURRENT OURA DATA — do not use recovery numbers to make today's call.");
+    if (st.needsReconnect) {
+      L.push("Oura authorization expired — reconnect at " + (st.connectUrl || "/oura/login") + ".");
+    } else {
+      L.push("Sync is stuck: newest stored night is " + (st.newestDate || "unknown") +
+             " (" + staleDays + " days old). Check /oura/status." +
+             (st.error ? " Last error: " + st.error : ""));
+    }
+    if (ol.date) {
+      L.push("(Most recent stored night, " + ol.date + ", NOT last night: Sleep " + fnum(ol.sleepScore) +
+             " · HRV " + fnum(ol.hrv) + " ms · RHR " + fnum(ol.lowestHr) + " — stale, for reference only.)");
+    }
+    const appleRhrS = latestVal(H, "restingHeartRate");
+    if (appleRhrS != null) {
+      L.push("Apple RHR " + fnum(appleRhrS) + " (waking) is the only live recovery signal right now — read its own trend, don't compare to Oura.");
+    }
+  } else if (ol.preliminary) {
     // No trustworthy HRV for last night yet. Two very different situations
     // hide behind that, and conflating them caused a week of false alarms:
     //   - you woke 20 minutes ago and Oura is simply still working (normal)
@@ -630,8 +656,13 @@ function buildSummary() {
          (avgDelta != null ? " · avg daily balance " + (avgDelta >= 0 ? "+" : "") + fk(avgDelta) + " kcal" : ""));
   // Same device-sourcing rule as the nightly line: Oura RHR, so the 7-day
   // average and last night's number are the same measure and comparable.
-  L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
-         " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(O, "lowestHr", 7)) + " (Oura)");
+  // Suppressed entirely when stale — a frozen average reads as a real trend.
+  if (isStale || st.needsReconnect) {
+    L.push("Sleep/Readiness/HRV/RHR — Oura sync stale, averages withheld (would be frozen, not current).");
+  } else {
+    L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
+           " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(O, "lowestHr", 7)) + " (Oura)");
+  }
 
   // TIMING (today) — protein distribution + peri-workout + workout times
   const timing = [];
@@ -717,9 +748,10 @@ async function loadOura(c) {
     const res = await fetch(c.base + "/oura", { headers: { Authorization: "Bearer " + c.token } });
     if (res.status === 409) { box.innerHTML = ouraConnectCard(c.base); return; }
     if (!res.ok) { box.innerHTML = ""; return; }
-    const { days } = await res.json();
+    const { days, status } = await res.json();
     const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
     DATA.oura = clean;
+    DATA.ouraStatus = status || null;
     renderOura(clean);
   } catch (e) { box.innerHTML = ""; }
 }
