@@ -199,7 +199,14 @@ $("gear").onclick = openSetup;
 $("copyBtn").onclick = onCopy;
 $("forget").onclick = () => { localStorage.removeItem(CFG); location.reload(); };
 $("save").onclick = async () => {
-  const base = $("base").value.trim().replace(/\/+$/, "");
+  // Keep only the origin. Pasting a full path here (easy after visiting
+  // /oura/status in a browser) made every request 404, because the dashboard
+  // appends its own paths — ".../oura/status" + "/health" is nothing.
+  let base = $("base").value.trim().replace(/\/+$/, "");
+  try {
+    const u = new URL(base);
+    base = u.origin;
+  } catch { /* leave as typed; the error below will catch a bad value */ }
   const token = $("token").value.trim();
   if (!base || !token) { $("setupErr").textContent = "Both fields are required."; return; }
   saveCfg({ base, token });
@@ -210,6 +217,7 @@ $("save").onclick = async () => {
 async function fetchDays(base, token) {
   const res = await fetch(base + "/health", { headers: { Authorization: "Bearer " + token } });
   if (res.status === 401) throw new Error("Token rejected — check for typos.");
+  if (res.status === 404) throw new Error("Worker returned 404 — the Worker URL is probably wrong. It should be just the origin (https://health-sync.mark-guidi-2.workers.dev) with no path after .dev.");
   if (!res.ok) throw new Error("Worker returned " + res.status + ".");
   const data = await res.json();
   return (data.days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1); // ascending
@@ -558,8 +566,25 @@ function buildSummary() {
   // yesterday or today, say so loudly and DON'T dress it up as last night.
   const st = DATA.ouraStatus || {};
   const staleDays = st.staleDays;
-  const isStale = staleDays != null && staleDays >= 2;
-  if (isStale || st.needsReconnect) {
+  // Oura dates a night by the morning you wake, so "last night" == today's date.
+  // A record dated yesterday means last night hasn't synced. Before ~11am that's
+  // just Oura still working; after that it's a stuck feed. The old >= 2 rule
+  // couldn't tell the difference and served yesterday's night as last night's.
+  const hourNow = new Date().getHours();
+  const oneDayGap = staleDays === 1;
+  const isStale = staleDays != null && (staleDays >= 2 || (oneDayGap && hourNow >= 11));
+  const noOura = !O.length || latestVal(O, "hrv") == null && latestVal(O, "sleepScore") == null;
+  if (st.fetchError || (noOura && !isStale)) {
+    // Bare dashes told us nothing for two days. Say what actually broke.
+    L.push("⚠ NO OURA DATA IN THE DASHBOARD — do not use recovery numbers to make today's call.");
+    L.push("Reason: " + (st.fetchError || "no usable metrics returned") +
+           (st.detail ? " — " + st.detail : ""));
+    L.push("Worker sync health: check /oura/status. If that page says healthy, the Worker has the data and the break is between Worker and dashboard (stale PWA cache, wrong Worker URL, or token).");
+    const appleRhrN = latestVal(H, "restingHeartRate");
+    if (appleRhrN != null) {
+      L.push("Apple RHR " + fnum(appleRhrN) + " (waking) is the only live recovery signal — read its own trend, don't compare to Oura.");
+    }
+  } else if (isStale || st.needsReconnect) {
     L.push("⚠ NO CURRENT OURA DATA — do not use recovery numbers to make today's call.");
     if (st.needsReconnect) {
       L.push("Oura authorization expired — reconnect at " + (st.connectUrl || "/oura/login") + ".");
@@ -615,8 +640,11 @@ function buildSummary() {
     // apparent "54 → 65 overnight jump" that was really just two devices —
     // and nearly cost a training day. Oura leads; Apple is a separate, tagged
     // line so a trend can only ever be read within one device.
+    // Date-stamp the line. Unlabelled numbers are how a frozen record passed as
+    // "last night" for nine days, and a one-day-old one for several more.
+    const nightTag = ol.date === t ? "" : "  [night of " + ol.date + ", NOT last night]";
     L.push("Sleep " + fnum(latestVal(O, "sleepScore")) + " · Readiness " + fnum(latestVal(O, "readinessScore")) +
-           " · HRV " + fnum(latestVal(O, "hrv")) + " ms · RHR " + fnum(ol.lowestHr) + " (Oura, sleeping)");
+           " · HRV " + fnum(latestVal(O, "hrv")) + " ms · RHR " + fnum(ol.lowestHr) + " (Oura, sleeping)" + nightTag);
     const appleRhr = latestVal(H, "restingHeartRate");
     if (appleRhr != null) L.push("Apple RHR " + fnum(appleRhr) + " (waking — different measure, don't compare to Oura)");
     if (ol.stagesPending) {
@@ -657,8 +685,8 @@ function buildSummary() {
   // Same device-sourcing rule as the nightly line: Oura RHR, so the 7-day
   // average and last night's number are the same measure and comparable.
   // Suppressed entirely when stale — a frozen average reads as a real trend.
-  if (isStale || st.needsReconnect) {
-    L.push("Sleep/Readiness/HRV/RHR — Oura sync stale, averages withheld (would be frozen, not current).");
+  if (isStale || st.needsReconnect || st.fetchError || noOura) {
+    L.push("Sleep/Readiness/HRV/RHR — Oura unavailable, averages withheld (would be stale or empty).");
   } else {
     L.push("Sleep " + fnum(avgN(O, "sleepScore", 7)) + " · Readiness " + fnum(avgN(O, "readinessScore", 7)) +
            " · HRV " + fnum(avgN(O, "hrv", 7)) + " · RHR " + fnum(avgN(O, "lowestHr", 7)) + " (Oura)");
@@ -669,11 +697,15 @@ function buildSummary() {
   const nT = N.find(d => d.date === t);
   if (nT && Array.isArray(nT.meals) && nT.meals.length) {
     const meals = nT.meals.slice().sort((a, b) => (a.t < b.t ? -1 : 1));
-    const buckets = { am: 0, mid: 0, eve: 0 };
+    const buckets = { am: 0, mid: 0, aft: 0, eve: 0 };
     for (const m of meals) {
       const hr = parseInt((m.t || "12:00").slice(0, 2), 10);
+      // Four windows, not three. The old cutoff put 16:00 into "eve", so a 4pm
+      // lunch was reported as evening protein — once turning 29/32/81/38 into
+      // a phantom "119g after 8pm" backload that wasn't real.
       if (hr < 11) buckets.am += m.p || 0;
       else if (hr < 16) buckets.mid += m.p || 0;
+      else if (hr < 19) buckets.aft += m.p || 0;
       else buckets.eve += m.p || 0;
     }
     // one line per item with full macros — carbs first (the glucose driver)
@@ -689,13 +721,20 @@ function buildSummary() {
       ].filter(Boolean).join(" ");
       timing.push(m.t + " " + label + wk + name + (macro ? " · " + macro : ""));
     }
-    const total = buckets.am + buckets.mid + buckets.eve;
-    let shape = "even";
-    if (total > 0) {
-      if (buckets.eve / total > 0.5) shape = "backloaded";
-      else if (buckets.am / total > 0.45) shape = "frontloaded";
-    }
-    timing.push("Protein spread: AM " + buckets.am + " / mid " + buckets.mid + " / eve " + buckets.eve + " \u2192 " + shape);
+    const total = buckets.am + buckets.mid + buckets.aft + buckets.eve;
+    // "even" used to be the default, so a day whose protein sat in ONE window
+    // still got reported as even (0 / 37 / 0 → "even"). Spread is only
+    // meaningful across multiple feeding windows; say so when it isn't.
+    const filled = ["am", "mid", "aft", "eve"].filter(k => buckets[k] > 0);
+    let shape;
+    if (total === 0) shape = "nothing logged yet";
+    else if (filled.length === 1) shape = "all in one window (" + filled[0] + ") — day incomplete or single-meal";
+    else if (buckets.eve / total > 0.5) shape = "backloaded";
+    else if (buckets.am / total > 0.45) shape = "frontloaded";
+    else if (Math.max(...filled.map(k => buckets[k])) / total > 0.55) shape = "concentrated";
+    else shape = "even";
+    timing.push("Protein spread: AM " + buckets.am + " / mid " + buckets.mid +
+                " / aft " + buckets.aft + " / eve " + buckets.eve + " \u2192 " + shape);
   }
   const wT = (DATA.workouts || []).find(d => d.date === t);
   if (wT && Array.isArray(wT.workouts) && wT.workouts.length) {
@@ -741,19 +780,54 @@ async function onCopy() {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSetup(); });
 
 // ─── Oura (sleep / readiness / HRV) ───
+// Failures here used to blank the panel silently, which is how a broken feed
+// looked identical to "no data yet". Every failure path now records WHY into
+// DATA.ouraStatus so the snapshot can report it and it can actually be fixed.
 async function loadOura(c) {
   const box = $("oura");
   if (!box) return;
   try {
     const res = await fetch(c.base + "/oura", { headers: { Authorization: "Bearer " + c.token } });
-    if (res.status === 409) { box.innerHTML = ouraConnectCard(c.base); return; }
-    if (!res.ok) { box.innerHTML = ""; return; }
-    const { days, status } = await res.json();
+    if (res.status === 409) {
+      DATA.ouraStatus = { fetchError: "not connected (409)", needsReconnect: true, connectUrl: c.base + "/oura/login" };
+      box.innerHTML = ouraConnectCard(c.base);
+      return;
+    }
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.text()).slice(0, 200); } catch {}
+      DATA.ouraStatus = { fetchError: "worker returned " + res.status, detail };
+      box.innerHTML = ouraErrorCard("Worker returned " + res.status, detail, c.base);
+      return;
+    }
+    const payload = await res.json();
+    const days = payload.days;
+    const status = payload.status;
     const clean = (days || []).filter(d => d && d.date).sort((a, b) => a.date < b.date ? -1 : 1);
     DATA.oura = clean;
     DATA.ouraStatus = status || null;
+    if (!clean.length) {
+      DATA.ouraStatus = { ...(status || {}), fetchError: "worker returned 0 stored days" };
+      box.innerHTML = ouraErrorCard("No Oura days returned", "The Worker responded OK but sent an empty list. Check /oura/status.", c.base);
+      return;
+    }
+    // Data arrived but carries no usable metrics — distinct from an empty list.
+    const usable = clean.filter(d => d.hrv != null || d.sleepScore != null);
+    if (!usable.length) {
+      DATA.ouraStatus = { ...(status || {}), fetchError: "days returned but all metrics empty" };
+    }
     renderOura(clean);
-  } catch (e) { box.innerHTML = ""; }
+  } catch (e) {
+    DATA.ouraStatus = { fetchError: "network/parse error", detail: String(e.message || e) };
+    box.innerHTML = ouraErrorCard("Couldn't reach the Worker", String(e.message || e), c.base);
+  }
+}
+
+function ouraErrorCard(title, detail, base) {
+  return '<div class="oura-connect"><div class="s-title">Sleep &amp; recovery — Oura</div>' +
+         '<div class="s-body"><b>' + title + '</b>' + (detail ? '<br><span class="mono" style="font-size:11px">' + detail + '</span>' : '') +
+         '<br><br>Check <span class="mono">/oura/status</span> for sync health.</div>' +
+         '<a href="' + base + '/oura/status" target="_blank" rel="noopener">Check sync status</a></div>';
 }
 
 function ouraConnectCard(base) {
