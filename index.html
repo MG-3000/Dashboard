@@ -168,6 +168,9 @@
     <input id="base" type="url" placeholder="https://health-sync.you.workers.dev" autocomplete="off" spellcheck="false">
     <label for="token">Access token</label>
     <input id="token" type="password" placeholder="Your HEALTH_TOKEN" autocomplete="current-password">
+    <label for="calStart">Count maintenance from</label>
+    <input id="calStart" type="date">
+    <p style="font-size:12px;opacity:.75;margin:4px 0 10px">Set this to your first full day home after travel. Leave blank to use the last 21 days.</p>
     <button id="save">Show my readout</button>
     <p class="err" id="setupErr"></p>
     <button class="link" id="forget">Forget this device</button>
@@ -177,7 +180,20 @@
 <script>
 const CFG = "recomp_cfg_v1";
 const DEFAULT_BASE = "https://health-sync.mark-guidi-2.workers.dev";
+// Clean-window start for maintenance calibration. Used when this device has
+// never saved a value; an empty saved value means "off" (plain 21-day window).
+const DEFAULT_CAL_START = "2026-10-14";
+function calStartCfg() { const c = loadCfg(); return c.calStart === undefined ? DEFAULT_CAL_START : (c.calStart || null); }
 const DATA = { health: [], oura: [], nutrition: [], weight: [], workouts: [] };
+// LOAD TRACKING — the secondary loads (weight, nutrition, workouts, Oura) are
+// fired in parallel and not awaited, so "Copy for Claude" could build the
+// snapshot before they finished. Oura is the slow one: when last night hasn't
+// landed, the Worker runs a live Oura pull before responding. A copy tapped
+// during that window saw DATA.oura = [] and reported "no usable metrics
+// returned" — a phantom outage that showed up on 10/10, 10/15, 10/18, 10/19.
+// onCopy now waits for these; buildSummary says "still loading" if it must.
+DATA.loads = null;
+DATA.ouraLoaded = false;
 
 const $ = (id) => document.getElementById(id);
 let charts = {};
@@ -190,6 +206,7 @@ function openSetup() {
   const c = loadCfg();
   $("base").value = c.base || DEFAULT_BASE;
   $("token").value = c.token || "";
+  $("calStart").value = c.calStart === undefined ? DEFAULT_CAL_START : (c.calStart || "");
   $("setupErr").textContent = "";
   $("overlay").classList.remove("hidden");
 }
@@ -209,7 +226,7 @@ $("save").onclick = async () => {
   } catch { /* leave as typed; the error below will catch a bad value */ }
   const token = $("token").value.trim();
   if (!base || !token) { $("setupErr").textContent = "Both fields are required."; return; }
-  saveCfg({ base, token });
+  saveCfg({ base, token, calStart: $("calStart").value || "" });
   closeSetup();
   await run();
 };
@@ -245,10 +262,8 @@ function run() {
     }
     DATA.health = days;
     render(days);
-    loadWeight(c);
-    loadNutrition(c);
-    loadWorkouts(c);
-    loadOura(c);
+    DATA.ouraLoaded = false;
+    DATA.loads = Promise.allSettled([loadWeight(c), loadNutrition(c), loadWorkouts(c), loadOura(c)]);
   }).catch(err => {
     $("app").innerHTML = '<div class="loading">' + err.message + '</div>';
     openSetup();
@@ -574,12 +589,23 @@ function buildSummary() {
   const oneDayGap = staleDays === 1;
   const isStale = staleDays != null && (staleDays >= 2 || (oneDayGap && hourNow >= 11));
   const noOura = !O.length || latestVal(O, "hrv") == null && latestVal(O, "sleepScore") == null;
-  if (st.fetchError || (noOura && !isStale)) {
+  const lastGoodAny = [...O].reverse().find(d => d.confirmed && d.hrv != null);
+  if (!DATA.ouraLoaded) {
+    // Not an outage — the Oura request simply hadn't returned when this was copied.
+    L.push("⏳ OURA STILL LOADING when this was copied — not a sync failure. Wait a few seconds and copy again.");
+    const appleRhrL = latestVal(H, "restingHeartRate");
+    if (appleRhrL != null) L.push("Apple RHR " + fnum(appleRhrL) + " (waking) — read its own trend, don't compare to Oura.");
+  } else if (st.fetchError || (noOura && !isStale)) {
     // Bare dashes told us nothing for two days. Say what actually broke.
     L.push("⚠ NO OURA DATA IN THE DASHBOARD — do not use recovery numbers to make today's call.");
     L.push("Reason: " + (st.fetchError || "no usable metrics returned") +
            (st.detail ? " — " + st.detail : ""));
     L.push("Worker sync health: check /oura/status. If that page says healthy, the Worker has the data and the break is between Worker and dashboard (stale PWA cache, wrong Worker URL, or token).");
+    // Same guarantee as the pending branch: always leave a dated real number.
+    if (lastGoodAny) {
+      L.push("Last confirmed night (" + lastGoodAny.date + "): HRV " + fnum(lastGoodAny.hrv) +
+             " ms · RHR " + fnum(lastGoodAny.lowestHr) + " (Oura)");
+    }
     const appleRhrN = latestVal(H, "restingHeartRate");
     if (appleRhrN != null) {
       L.push("Apple RHR " + fnum(appleRhrN) + " (waking) is the only live recovery signal — read its own trend, don't compare to Oura.");
@@ -673,8 +699,15 @@ function buildSummary() {
 
   L.push("7-DAY AVERAGES (today excluded)");
   const actAvg = avgN(H, "activeEnergy", 7, t), restAvg = avgN(H, "restingEnergy", 7, t);
-  const cal = calibrateMaintenance(N, DATA.weight || []);
-  const maintLabel = cal.ok ? (fk(cal.lo) + "–" + fk(cal.hi) + " (calibrated)") : "~2,450 (anchor)";
+  const cal = calibrateBest(N, DATA.weight || []);
+  let maintLabel = cal.ok ? (fk(cal.lo) + "–" + fk(cal.hi) + " (calibrated)") : "~2,450 (anchor)";
+  if (cal.source === "clean") {
+    maintLabel = fk(cal.lo) + "–" + fk(cal.hi) + " (calibrated, clean window since " + cal.start + ")";
+  } else if (cal.start) {
+    maintLabel += " — 21-day window, INCLUDES pre-" + cal.start + " travel. Clean read" +
+      (cal.cleanFirstRead ? " from " + cal.cleanFirstRead : "") +
+      (cal.cleanDaysLeft != null ? " (" + cal.cleanDaysLeft + " days to go)" : " pending");
+  }
   L.push("Steps " + fk(avgN(H, "steps", 7, t)) + "/day · Active " + fnum(actAvg) + " kcal/day");
   L.push("Calibrated maintenance " + maintLabel + " · derived from scale, not watch");
   const calAvg = avgN(N, "calories", 7, t);
@@ -757,6 +790,11 @@ function buildSummary() {
 
 async function onCopy() {
   const btn = $("copyBtn");
+  if (DATA.loads && !DATA.ouraLoaded) {
+    btn.textContent = "Waiting for Oura…";
+    await Promise.race([DATA.loads, new Promise(r => setTimeout(r, 15000))]);
+    btn.textContent = "⧉ Copy for Claude";
+  }
   const text = buildSummary();
   try {
     await navigator.clipboard.writeText(text);
@@ -785,7 +823,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSetup
 // DATA.ouraStatus so the snapshot can report it and it can actually be fixed.
 async function loadOura(c) {
   const box = $("oura");
-  if (!box) return;
+  if (!box) { DATA.ouraLoaded = true; return; }
   try {
     const res = await fetch(c.base + "/oura", { headers: { Authorization: "Bearer " + c.token } });
     if (res.status === 409) {
@@ -820,6 +858,8 @@ async function loadOura(c) {
   } catch (e) {
     DATA.ouraStatus = { fetchError: "network/parse error", detail: String(e.message || e) };
     box.innerHTML = ouraErrorCard("Couldn't reach the Worker", String(e.message || e), c.base);
+  } finally {
+    DATA.ouraLoaded = true;
   }
 }
 
@@ -889,7 +929,7 @@ function renderScorecard() {
   if (avgIntake == null) { box.innerHTML = ""; return; }
 
   // Calibrated maintenance (falls back to 2450 anchor if window not clean yet)
-  const cal = calibrateMaintenance(N, W);
+  const cal = calibrateBest(N, W);
   const maint = cal.ok ? cal.maintenance : 2450;
   const avgDeficit = Math.round(avgIntake - maint); // negative = deficit
 
@@ -998,9 +1038,12 @@ function renderScorecard() {
 // approximates real tissue change, so this converges on true maintenance and
 // automatically tracks downward as bodyweight drops. Guardrails below stop a
 // short/watery window from poisoning the estimate.
-function calibrateMaintenance(N, W) {
+function calibrateMaintenance(N, W, startDate) {
   const nByDate = {}; for (const d of N) if (d.calories != null) nByDate[d.date] = d.calories;
-  const wdays = W.filter(d => d.weight != null).sort((a, b) => a.date < b.date ? -1 : 1);
+  // startDate: ignore everything before a clean-window start (e.g. first day
+  // home after travel). Travel water on the scale and travel eating in the log
+  // otherwise sit in the 21-day window for three weeks and drag the estimate.
+  const wdays = W.filter(d => d.weight != null && (!startDate || d.date >= startDate)).sort((a, b) => a.date < b.date ? -1 : 1);
   const today = todayLocal();
 
   // Use the longest clean window we have, capped at 21 days, floored at 14.
@@ -1010,7 +1053,10 @@ function calibrateMaintenance(N, W) {
 
   const first = wdays[0], last = wdays[wdays.length - 1];
   const spanDays = Math.round((new Date(last.date) - new Date(first.date)) / 86400000);
-  if (spanDays < MIN_DAYS) return { ok: false, reason: "Keep logging — " + (MIN_DAYS - spanDays) + " more days for a reliable maintenance estimate" };
+  if (spanDays < MIN_DAYS) {
+    const firstRead = new Date(new Date(first.date).getTime() + MIN_DAYS * 86400000).toISOString().slice(0, 10);
+    return { ok: false, reason: "Keep logging — " + (MIN_DAYS - spanDays) + " more days for a reliable maintenance estimate", daysLeft: MIN_DAYS - spanDays, firstRead };
+  }
 
   // Window: last MAX_DAYS of weight data
   const cutoff = new Date(new Date(last.date) - MAX_DAYS * 86400000);
@@ -1057,6 +1103,20 @@ function calibrateMaintenance(N, W) {
   };
 }
 
+// Prefer the clean window; until it has 14 days, fall back to the plain
+// 21-day estimate but say so, so a travel-contaminated number is never
+// mistaken for the clean one.
+function calibrateBest(N, W) {
+  const start = calStartCfg();
+  if (start) {
+    const clean = calibrateMaintenance(N, W, start);
+    if (clean.ok) return { ...clean, source: "clean", start };
+    const full = calibrateMaintenance(N, W, null);
+    return { ...full, source: "21-day", start, cleanDaysLeft: clean.daysLeft, cleanFirstRead: clean.firstRead };
+  }
+  return { ...calibrateMaintenance(N, W, null), source: "21-day" };
+}
+
 // ─── Today's reference balance (directional only — NOT part of calibration) ───
 // The main panel below answers "is the WEEKLY AVERAGE a real deficit" — every day
 // is compared against the same calibrated maintenance number, on purpose, because
@@ -1093,7 +1153,7 @@ function renderDeficit() {
   const H = DATA.health, N = DATA.nutrition, W = DATA.weight || [];
   if (!N.length) return;
 
-  const cal = calibrateMaintenance(N, W);
+  const cal = calibrateBest(N, W);
   const nByDate = {}; for (const d of N) nByDate[d.date] = d;
   const today = todayLocal();
 
